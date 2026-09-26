@@ -89,11 +89,17 @@ pub struct Frame {
 
 /// Something that produces frames to stream.
 pub trait FrameSource: Send {
+    /// Cheap check for the id of the buffer currently shown, without copying
+    /// it. `None` while there is nothing to show.
+    fn current_id(&mut self) -> Result<Option<u32>>;
     /// The latest frame, or `None` while there is nothing to show.
     fn grab(&mut self) -> Result<Option<Frame>>;
 }
 
 impl FrameSource for Capturer {
+    fn current_id(&mut self) -> Result<Option<u32>> {
+        Ok(self.current_fb()?.map(Into::into))
+    }
     fn grab(&mut self) -> Result<Option<Frame>> {
         Capturer::grab(self)
     }
@@ -266,16 +272,20 @@ pub struct TestPattern {
     width: u32,
     height: u32,
     start: std::time::Instant,
-    counter: u32,
 }
 
 impl TestPattern {
     pub fn new(width: u32, height: u32) -> Self {
-        Self { width, height, start: std::time::Instant::now(), counter: 0 }
+        Self { width, height, start: std::time::Instant::now() }
     }
 }
 
 impl FrameSource for TestPattern {
+    /// Behaves like a display flipping at 60 Hz.
+    fn current_id(&mut self) -> Result<Option<u32>> {
+        Ok(Some((self.start.elapsed().as_secs_f64() * 60.0) as u32))
+    }
+
     fn grab(&mut self) -> Result<Option<Frame>> {
         const BARS: [[u8; 3]; 7] = [
             [192, 192, 192],
@@ -306,12 +316,11 @@ impl FrameSource for TestPattern {
                 px[3] = 255;
             }
         }
-        self.counter = self.counter.wrapping_add(1);
         Ok(Some(Frame {
             width: self.width,
             height: self.height,
             format: PixelFormat::Rgbx,
-            buffer_id: self.counter,
+            buffer_id: (t * 60.0) as u32,
             data,
         }))
     }

@@ -13,6 +13,7 @@ tabula-vdisplay = { path = "crates/vdisplay" }
 tabula-capture = { path = "crates/capture" }
 tabula-encode = { path = "crates/encode" }
 tabula-session = { path = "crates/session" }
+tabula-vinput = { path = "crates/vinput" }
 anyhow = "1"
 thiserror = "2"
 clap = { version = "4.6", features = ["derive"] }
@@ -29,3 +30,4 @@ mime_guess = "2"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+evdev = "0.13"

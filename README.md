@@ -11,7 +11,8 @@ Use an Android pen tablet as a second (or mirrored) monitor and a pressure-sensi
 
 - Milestone 0 (virtual monitor + capture): works. COSMIC needs a cosmic-comp fix for display-only DRM devices whose EGL render node belongs to another GPU (vkms through Mesa's kmsro); without it the vkms output stays black and the compositor logs `NoDevice` renderer errors. GNOME and KDE are untested.
 - Milestone 1 (encode + web viewer + streaming): works end to end on a real tablet over USB (~40 fps with motion, 6–8 ms round trip).
-- Next: pen input through uinput (milestone 2).
+- Milestone 2 (pen through uinput): works on COSMIC; pressure, tilt, eraser and barrel buttons. Capture polls for new buffers every 4 ms so flips aren't missed.
+- Next: LAN mode (HTTPS + pairing), hardware encoder, touch.
 
 ## Build
 
@@ -36,12 +37,21 @@ sudo ./target/release/tabula teardown   # removes the monitor
 
 On the tablet, connect over USB with USB debugging enabled, start `tabula run`, then open `http://localhost:7543` in Chrome and tap **Enter fullscreen**. `?hud=1` shows fps and round-trip time. `?mouse=1` treats the mouse as a pen, for testing on a desktop.
 
-The virtual monitor starts at 1024×768. Pick a mode closer to your tablet's resolution in display settings. Rebuilding the binary drops its capability, so rerun `setup` after a rebuild.
+The virtual monitor starts at 1024×768. Set its mode in display settings:
 
-## Map the pen to the tablet's monitor
+- **Extend:** use a mode with the tablet's aspect ratio, e.g. 2560×1600 or 1920×1200 for a 16:10 tablet.
+- **Mirror:** use the same mode *and scale* as the mirrored display. COSMIC draws the mirrored display's logical area at the target's scale without stretching it, so a 1920×1200 laptop at 110% needs `Virtual-1` at 1920×1200 and 110%. Otherwise the picture is letterboxed inside the frame. On COSMIC: `cosmic-randr mode Virtual-1 1920 1200 --scale 1.1`.
 
-Once the pen is added, map its input device to the virtual monitor in your desktop's settings:
+Rebuilding the binary drops its capability, so rerun `setup` after a rebuild.
 
-- GNOME: Settings → Wacom Tablet → Map to Monitor
-- KDE: System Settings → Drawing Tablet → Map to screen
-- COSMIC: `map_to_output` in the input config
+## Pen
+
+When the tablet connects, tabula creates a uinput tablet named **tabula pen** (screen tablet, pressure, tilt, eraser, barrel buttons). `tabula setup` installs a udev rule that lets the logged-in user create it; `--view-only` disables it.
+
+Pen positions cover the whole streamed monitor, so the desktop has to map the device onto that monitor:
+
+- **Mirror:** map it to the mirrored display. COSMIC maps tablets to the built-in display by default, so nothing needs to be set.
+- **Extend:** map it to the virtual monitor.
+  - GNOME: Settings → Wacom Tablet → Map to Monitor
+  - KDE: System Settings → Drawing Tablet → Map to screen
+  - COSMIC: in `~/.config/cosmic/com.system76.CosmicComp/v1/input_devices`, add `"tabula pen": (state: Enabled, map_to_output: Some("Virtual-1"))`

@@ -11,7 +11,8 @@ use std::sync::Arc;
 use tabula_capture::{Capturer, FrameSource, TestPattern};
 use tabula_encode::{EncoderKind, EncoderOptions};
 use tabula_protocol::DEFAULT_PORT;
-use tabula_session::{LogInput, SessionOptions};
+use tabula_session::{InputHandler, LogInput, SessionOptions};
+use tabula_vinput::{PenDevice, PhysicalSize};
 use tabula_vdisplay::{DEFAULT_NAME, Status, VirtualDisplay};
 
 #[derive(Parser)]
@@ -37,6 +38,9 @@ enum Cmd {
         fps: u32,
         #[arg(long, default_value_t = 12_000)]
         bitrate_kbps: u32,
+        /// Don't create the virtual pen; the tablet only shows the screen.
+        #[arg(long)]
+        view_only: bool,
     },
     /// Create the virtual monitor and grant this binary capture rights (run as root).
     Setup {
@@ -66,9 +70,9 @@ fn main() -> Result<()> {
         )
         .init();
     match Cli::parse().cmd {
-        Cmd::Run { port, test_pattern, test_size, fps, bitrate_kbps } => {
+        Cmd::Run { port, test_pattern, test_size, fps, bitrate_kbps, view_only } => {
             let source = if test_pattern { Source::Test(test_size) } else { Source::VirtualDisplay };
-            run(port, source, fps, bitrate_kbps)
+            run(port, source, fps, bitrate_kbps, view_only)
         }
         Cmd::Setup { binary } => setup(binary),
         Cmd::Teardown => VirtualDisplay::new(DEFAULT_NAME).destroy(),
@@ -87,6 +91,9 @@ fn setup(binary: Option<PathBuf>) -> Result<()> {
     VirtualDisplay::new(DEFAULT_NAME).create()?;
     println!("virtual monitor enabled; it should now appear in your display settings");
 
+    install_uinput_rule()?;
+    println!("/dev/uinput is now accessible to the logged-in user (for the virtual pen)");
+
     let binary = match binary {
         Some(b) => b,
         None => std::env::current_exe().context("locating this executable")?,
@@ -103,6 +110,27 @@ fn setup(binary: Option<PathBuf>) -> Result<()> {
         "granted CAP_SYS_ADMIN to {} (rebuilding the binary drops it; rerun setup)",
         binary.display()
     );
+    Ok(())
+}
+
+const UINPUT_RULE_PATH: &str = "/etc/udev/rules.d/70-tabula-uinput.rules";
+/// `uaccess` grants the user of the active local session access, the same
+/// way Steam's rules do for game controllers, without adding anyone to a group.
+const UINPUT_RULE: &str = "# Installed by `tabula setup`: lets the active session create the virtual pen.\n\
+KERNEL==\"uinput\", SUBSYSTEM==\"misc\", TAG+=\"uaccess\", OPTIONS+=\"static_node=uinput\"\n";
+
+fn install_uinput_rule() -> Result<()> {
+    std::fs::write(UINPUT_RULE_PATH, UINPUT_RULE)
+        .with_context(|| format!("writing {UINPUT_RULE_PATH}"))?;
+    for args in [
+        &["control", "--reload-rules"][..],
+        &["trigger", "--action=change", "--sysname-match=uinput"][..],
+    ] {
+        let status = Command::new("udevadm").args(args).status().context("running udevadm")?;
+        if !status.success() {
+            bail!("udevadm {} failed ({status})", args.join(" "));
+        }
+    }
     Ok(())
 }
 
@@ -156,7 +184,34 @@ enum Source {
     Test((u32, u32)),
 }
 
-fn run(port: u16, source: Source, fps: u32, bitrate_kbps: u32) -> Result<()> {
+struct PenInput(PenDevice);
+
+impl InputHandler for PenInput {
+    fn pen(&mut self, pen: &tabula_protocol::Pen) {
+        if let Err(e) = self.0.pen(pen) {
+            tracing::warn!("pen input: {e:#}");
+        }
+    }
+    fn release(&mut self) {
+        let _ = self.0.release();
+    }
+}
+
+fn make_input(hello: &tabula_protocol::Hello, view_only: bool) -> Box<dyn InputHandler> {
+    if view_only || !hello.features.contains(tabula_protocol::Features::PEN) {
+        return Box::new(LogInput);
+    }
+    let size = PhysicalSize::from_pixels(hello.screen_w, hello.screen_h, hello.dpi);
+    match PenDevice::new(size) {
+        Ok(dev) => Box::new(PenInput(dev)),
+        Err(e) => {
+            tracing::warn!("no pen input: {e:#}");
+            Box::new(LogInput)
+        }
+    }
+}
+
+fn run(port: u16, source: Source, fps: u32, bitrate_kbps: u32, view_only: bool) -> Result<()> {
     let card = match source {
         Source::VirtualDisplay => {
             if VirtualDisplay::new(DEFAULT_NAME).status() != Status::Enabled {
@@ -183,8 +238,8 @@ fn run(port: u16, source: Source, fps: u32, bitrate_kbps: u32) -> Result<()> {
         };
         let opts = opts.clone();
         tokio::spawn(async move {
-            let result =
-                tabula_session::run(sink, stream, make_source, Box::new(LogInput), opts).await;
+            let make_input = move |hello: &tabula_protocol::Hello| make_input(hello, view_only);
+            let result = tabula_session::run(sink, stream, make_source, make_input, opts).await;
             if let Err(e) = result {
                 tracing::warn!("session ended: {e:#}");
             }

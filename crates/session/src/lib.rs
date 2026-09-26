@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tabula_capture::FrameSource;
 use tabula_encode::{AccessUnit, Encoder, EncoderOptions, codec_string};
-use tabula_protocol::{DecodeError, Message, PROTOCOL_VERSION, Pen, StreamConfig, Video};
+use tabula_protocol::{DecodeError, Hello, Message, PROTOCOL_VERSION, Pen, StreamConfig, Video};
 use tokio::sync::mpsc;
 
 pub trait MessageSink: Send {
@@ -27,6 +27,8 @@ pub trait MessageStream: Send {
 /// Receives pen (and later touch) input from the client.
 pub trait InputHandler: Send {
     fn pen(&mut self, pen: &Pen);
+    /// Called once when the session ends.
+    fn release(&mut self) {}
 }
 
 /// Logs input instead of injecting it.
@@ -47,6 +49,9 @@ pub struct SessionOptions {
 /// If the source keeps showing the same buffer, still send a frame this often
 /// so a newly (re)started decoder always gets a picture.
 const REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+/// How often to look for a new buffer. Much faster than the display's refresh
+/// so flips are picked up right away instead of beating against our timer.
+const POLL_INTERVAL: Duration = Duration::from_millis(4);
 const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Encoded frames queued for the network before we start dropping.
 const OUTPUT_QUEUE: usize = 3;
@@ -56,17 +61,18 @@ enum Out {
     Video(AccessUnit),
 }
 
-pub async fn run<S, R, F>(
+pub async fn run<S, R, F, I>(
     mut sink: S,
     mut stream: R,
     make_source: F,
-    mut input: Box<dyn InputHandler>,
+    make_input: I,
     opts: SessionOptions,
 ) -> Result<()>
 where
     S: MessageSink,
     R: MessageStream,
     F: FnOnce() -> Result<Box<dyn FrameSource>> + Send + 'static,
+    I: FnOnce(&Hello) -> Box<dyn InputHandler>,
 {
     let hello = match tokio::time::timeout(HELLO_TIMEOUT, stream.recv()).await {
         Err(_) => bail!("client sent no Hello within {HELLO_TIMEOUT:?}"),
@@ -86,6 +92,7 @@ where
         features = hello.features.0,
         "client connected"
     );
+    let mut input = make_input(&hello);
 
     let stop = Arc::new(AtomicBool::new(false));
     let want_key = Arc::new(AtomicBool::new(false));
@@ -138,6 +145,7 @@ where
     }
     .await;
 
+    input.release();
     stop.store(true, Ordering::Relaxed);
     drop(rx);
     let _ = tokio::task::spawn_blocking(move || producer.join()).await;
@@ -145,9 +153,9 @@ where
     result
 }
 
-/// Capture thread: grabs frames at `fps`, (re)creates the encoder when the
-/// source size changes, and runs a puller thread per encoder that forwards
-/// access units into `tx`.
+/// Capture thread: polls the source for new buffers, sends at most `fps`
+/// frames per second, (re)creates the encoder when the source size changes,
+/// and runs a puller thread per encoder that forwards access units into `tx`.
 fn produce(
     mut source: Box<dyn FrameSource>,
     opts: &SessionOptions,
@@ -155,20 +163,25 @@ fn produce(
     want_key: &Arc<AtomicBool>,
     tx: mpsc::Sender<Out>,
 ) -> Result<()> {
-    let period = Duration::from_secs_f64(1.0 / opts.fps.max(1) as f64);
+    // A little under the nominal period, so a source flipping at exactly
+    // `fps` isn't throttled by timer jitter.
+    let min_interval = Duration::from_secs_f64(0.9 / opts.fps.max(1) as f64);
     let start = Instant::now();
-    let mut next = start;
     let mut encoder: Option<(Encoder, std::thread::JoinHandle<()>)> = None;
     let mut last_id = None;
-    let mut last_push = start;
+    let mut last_push: Option<Instant> = None;
 
     while !stop.load(Ordering::Relaxed) && !tx.is_closed() {
-        next += period;
+        std::thread::sleep(POLL_INTERVAL);
         let now = Instant::now();
-        if next > now {
-            std::thread::sleep(next - now);
-        } else {
-            next = now;
+        let since_push = last_push.map_or(Duration::MAX, |t| now - t);
+        if since_push < min_interval {
+            continue;
+        }
+        let Some(id) = source.current_id()? else { continue };
+        let key_requested = want_key.load(Ordering::Relaxed);
+        if last_id == Some(id) && since_push < REFRESH_INTERVAL && !key_requested {
+            continue;
         }
 
         let Some(frame) = source.grab()? else { continue };
@@ -182,17 +195,13 @@ fn produce(
             let enc = Encoder::new(frame.width, frame.height, frame.format, &opts.encoder)?;
             let puller = spawn_puller(&enc, size, tx.clone(), want_key.clone())?;
             encoder = Some((enc, puller));
-            last_id = None;
         }
         let (enc, _) = encoder.as_ref().unwrap();
-
         if want_key.swap(false, Ordering::Relaxed) {
             enc.force_keyframe();
-        } else if last_id == Some(frame.buffer_id) && now - last_push < REFRESH_INTERVAL {
-            continue;
         }
         last_id = Some(frame.buffer_id);
-        last_push = now;
+        last_push = Some(now);
         enc.push(frame, (now - start).as_micros() as u64)?;
     }
     Ok(())
