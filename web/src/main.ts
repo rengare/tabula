@@ -164,7 +164,7 @@ let lastFrames = 0;
 setInterval(() => {
   const median = (v: number[]) => (v.length ? v.sort((a, b) => a - b)[Math.floor(v.length / 2)].toFixed(1) : "-");
   const queue = decoder?.decodeQueueSize ?? 0;
-  hud.textContent = `${framesDrawn - lastFrames} fps · rtt ${rttMs.toFixed(1)} ms · decode ${median(decodeMs)} ms · draw ${median(drawMs)} ms · queue ${queue}`;
+  hud.textContent = `${framesDrawn - lastFrames} fps · rtt ${rttMs.toFixed(1)} ms · decode ${median(decodeMs)} ms · draw ${median(drawMs)} ms · queue ${queue} · palm ${touchesDown.size}`;
   decodeMs = [];
   drawMs = [];
   lastFrames = framesDrawn;
@@ -223,6 +223,12 @@ let penLastSeen = -Infinity;
 let lastPen: Pen | null = null;
 /** Fingers currently down, by pointerId. */
 const touches = new Map<number, Contact>();
+/**
+ * Every touch pointer currently on the screen, including rejected ones.
+ * A resting palm distorts the pen's hover position by several millimeters,
+ * so hover updates are held while any touch is down.
+ */
+const touchesDown = new Set<number>();
 
 // "pen": fingers are ignored entirely (rest your hand on the screen while drawing).
 // "touch": fingers act as a touchscreen, with palm rejection while the pen is near.
@@ -279,6 +285,8 @@ function freeTouchId(): number | undefined {
 
 function onTouch(e: PointerEvent) {
   e.preventDefault();
+  if (e.type === "pointerdown") touchesDown.add(e.pointerId);
+  else if (e.type !== "pointermove") touchesDown.delete(e.pointerId);
   const known = touches.get(e.pointerId);
   switch (e.type) {
     case "pointerdown": {
@@ -345,7 +353,10 @@ function onPointer(e: PointerEvent) {
   const samples = e.type === "pointermove" && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   for (const s of samples.length ? samples : [e]) {
     const pen = penFrom(s, true);
-    const filtered = hoverFilter.filter(pen.x, pen.y, pen.contact, s.timeStamp / 1000);
+    // With a palm down, hover positions wander; keep the cursor where it was
+    // until the tip touches (tip positions stay accurate).
+    const palmDown = !pen.contact && touchesDown.size > 0;
+    const filtered = palmDown ? null : hoverFilter.filter(pen.x, pen.y, pen.contact, s.timeStamp / 1000);
     // Button and contact changes always go through; hover glitches don't.
     const changed = !lastPen || pen.contact !== lastPen.contact || pen.buttons !== lastPen.buttons || pen.tool !== lastPen.tool;
     if (!filtered && !changed) continue;
