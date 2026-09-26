@@ -1,4 +1,5 @@
 mod adb;
+mod lan;
 mod ws;
 
 use anyhow::{Context, Result, bail};
@@ -12,7 +13,7 @@ use tabula_capture::{Capturer, FrameSource, TestPattern};
 use tabula_encode::{EncoderKind, EncoderOptions};
 use tabula_protocol::DEFAULT_PORT;
 use tabula_session::{InputHandler, LogInput, SessionOptions};
-use tabula_vinput::{PenDevice, PhysicalSize};
+use tabula_vinput::{PenDevice, PhysicalSize, TouchDevice};
 use tabula_vdisplay::{DEFAULT_NAME, Status, VirtualDisplay};
 
 #[derive(Parser)]
@@ -38,12 +39,23 @@ enum Cmd {
         fps: u32,
         #[arg(long, default_value_t = 12_000)]
         bitrate_kbps: u32,
+        /// H.264 encoder: x264, openh264, or v4l2 (hardware, opt-in). Default: x264.
+        #[arg(long)]
+        encoder: Option<EncoderKind>,
         /// Don't create the virtual pen; the tablet only shows the screen.
         #[arg(long)]
         view_only: bool,
         /// Log per-stage latency percentiles every few seconds.
         #[arg(long)]
         stats: bool,
+        /// Also serve HTTPS on all interfaces for tablets on the same network.
+        #[arg(long)]
+        lan: bool,
+        #[arg(long, default_value_t = DEFAULT_PORT + 1)]
+        lan_port: u16,
+        /// Replace the LAN pairing token, disconnecting tablets paired with the old one.
+        #[arg(long)]
+        new_token: bool,
         /// Frames in flight before waiting for the client's decoder (0 = no flow control).
         #[arg(long, default_value_t = 2)]
         max_in_flight: usize,
@@ -82,18 +94,30 @@ fn main() -> Result<()> {
             test_size,
             fps,
             bitrate_kbps,
+            encoder,
             view_only,
             stats,
             max_in_flight,
+            lan,
+            lan_port,
+            new_token,
         } => {
+            let kind = match encoder {
+                Some(kind) => {
+                    kind.check().with_context(|| format!("encoder {kind:?} is not usable"))?;
+                    kind
+                }
+                None => EncoderKind::detect()?,
+            };
             let source = if test_pattern { Source::Test(test_size) } else { Source::VirtualDisplay };
             let opts = SessionOptions {
-                encoder: EncoderOptions { kind: EncoderKind::detect()?, bitrate_kbps },
+                encoder: EncoderOptions { kind, bitrate_kbps },
                 fps,
                 stats,
                 max_in_flight,
             };
-            run(port, source, opts, view_only)
+            let lan = if lan { Some((lan_port, lan::load_or_create(new_token)?)) } else { None };
+            run(port, lan, source, opts, view_only)
         }
         Cmd::Setup { binary } => setup(binary),
         Cmd::Teardown => VirtualDisplay::new(DEFAULT_NAME).destroy(),
@@ -205,34 +229,66 @@ enum Source {
     Test((u32, u32)),
 }
 
-struct PenInput(PenDevice);
+/// The session's virtual input devices; either may be missing.
+struct DeviceInput {
+    pen: Option<PenDevice>,
+    touch: Option<TouchDevice>,
+}
 
-impl InputHandler for PenInput {
+impl InputHandler for DeviceInput {
     fn pen(&mut self, pen: &tabula_protocol::Pen) {
-        if let Err(e) = self.0.pen(pen) {
+        if let Some(dev) = &mut self.pen
+            && let Err(e) = dev.pen(pen)
+        {
             tracing::warn!("pen input: {e:#}");
         }
     }
+    fn touch(&mut self, contacts: &[tabula_protocol::Contact]) {
+        if let Some(dev) = &mut self.touch
+            && let Err(e) = dev.touch(contacts)
+        {
+            tracing::warn!("touch input: {e:#}");
+        }
+    }
     fn release(&mut self) {
-        let _ = self.0.release();
+        if let Some(dev) = &mut self.pen {
+            let _ = dev.release();
+        }
+        if let Some(dev) = &mut self.touch {
+            let _ = dev.release();
+        }
     }
 }
 
 fn make_input(hello: &tabula_protocol::Hello, view_only: bool) -> Box<dyn InputHandler> {
-    if view_only || !hello.features.contains(tabula_protocol::Features::PEN) {
+    use tabula_protocol::Features;
+    if view_only {
         return Box::new(LogInput);
     }
     let size = PhysicalSize::from_pixels(hello.screen_w, hello.screen_h, hello.dpi);
-    match PenDevice::new(size) {
-        Ok(dev) => Box::new(PenInput(dev)),
-        Err(e) => {
-            tracing::warn!("no pen input: {e:#}");
-            Box::new(LogInput)
-        }
+    let pen = hello
+        .features
+        .contains(Features::PEN)
+        .then(|| PenDevice::new(size).inspect_err(|e| tracing::warn!("no pen input: {e:#}")).ok())
+        .flatten();
+    let touch = hello
+        .features
+        .contains(Features::TOUCH)
+        .then(|| TouchDevice::new(size).inspect_err(|e| tracing::warn!("no touch input: {e:#}")).ok())
+        .flatten();
+    if pen.is_none() && touch.is_none() {
+        return Box::new(LogInput);
     }
+    Box::new(DeviceInput { pen, touch })
 }
 
-fn run(port: u16, source: Source, opts: SessionOptions, view_only: bool) -> Result<()> {
+fn run(
+    port: u16,
+    lan: Option<(u16, lan::LanConfig)>,
+    source: Source,
+    opts: SessionOptions,
+    view_only: bool,
+) -> Result<()> {
     let card = match source {
         Source::VirtualDisplay => {
             if VirtualDisplay::new(DEFAULT_NAME).status() != Status::Enabled {
@@ -276,11 +332,31 @@ fn run(port: u16, source: Source, opts: SessionOptions, view_only: bool) -> Resu
         } else {
             println!("forwarded to {}: open http://localhost:{port} on the tablet", devices.join(", "));
         }
-        axum::serve(listener, ws::router(on_connect))
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
-            })
-            .await?;
+        let local = axum::serve(listener, ws::router(on_connect.clone(), None)).into_future();
+        let lan_server = async {
+            let Some((lan_port, cfg)) = lan else {
+                return std::future::pending::<Result<()>>().await;
+            };
+            let tls = axum_server::tls_rustls::RustlsConfig::from_pem(cfg.cert_pem, cfg.key_pem)
+                .await
+                .context("loading TLS certificate")?;
+            let addr = SocketAddr::from(([0, 0, 0, 0], lan_port));
+            let router = ws::router(on_connect, Some(Arc::from(cfg.token.as_str())));
+            let server = axum_server::bind_rustls(addr, tls).serve(router.into_make_service());
+            println!("LAN: open on the tablet (accept the self-signed certificate once):");
+            for ip in &cfg.addresses {
+                println!("  https://{ip}:{lan_port}/?token={}", cfg.token);
+            }
+            if let Some(ip) = cfg.addresses.first() {
+                lan::print_qr(&format!("https://{ip}:{lan_port}/?token={}", cfg.token));
+            }
+            server.await.with_context(|| format!("serving HTTPS on {addr}"))
+        };
+        tokio::select! {
+            r = local => r?,
+            r = lan_server => r?,
+            _ = tokio::signal::ctrl_c() => {}
+        }
         Ok(())
     })
 }

@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tabula_capture::FrameSource;
 use tabula_encode::{AccessUnit, Encoder, EncoderOptions, codec_string};
 use tabula_protocol::{
-    DecodeError, Features, Hello, Message, PROTOCOL_VERSION, Pen, StreamConfig, Video,
+    Contact, DecodeError, Features, Hello, Message, PROTOCOL_VERSION, Pen, StreamConfig, Video,
 };
 use tokio::sync::mpsc;
 
@@ -35,6 +35,8 @@ pub trait MessageStream: Send {
 /// Receives pen (and later touch) input from the client.
 pub trait InputHandler: Send {
     fn pen(&mut self, pen: &Pen);
+    /// The complete set of fingers currently touching.
+    fn touch(&mut self, _contacts: &[Contact]) {}
     /// Called once when the session ends.
     fn release(&mut self) {}
 }
@@ -162,6 +164,7 @@ where
                             }
                             input.pen(&p);
                         }
+                        Message::Touch(contacts) => input.touch(&contacts),
                         Message::Ping { t } => sink.send(Message::Pong { t }).await?,
                         Message::RequestKeyframe => {
                             // The client reset its decoder; nothing in flight will be acked.

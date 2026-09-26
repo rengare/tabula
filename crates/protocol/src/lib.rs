@@ -16,6 +16,7 @@ pub const DEFAULT_PORT: u16 = 7543;
 mod tag {
     pub const HELLO: u8 = 0x01;
     pub const PEN: u8 = 0x02;
+    pub const TOUCH: u8 = 0x03;
     pub const PING: u8 = 0x04;
     pub const REQUEST_KEYFRAME: u8 = 0x05;
     pub const ACK: u8 = 0x06;
@@ -103,6 +104,16 @@ pub struct Pen {
     pub in_range: bool,
 }
 
+/// One finger on the screen.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Contact {
+    /// Stable for as long as the finger stays down.
+    pub id: u8,
+    /// Normalized like [`Pen::x`] / [`Pen::y`].
+    pub x: u16,
+    pub y: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamConfig {
     pub width: u16,
@@ -123,6 +134,8 @@ pub struct Video {
 pub enum Message {
     Hello(Hello),
     Pen(Pen),
+    /// All fingers currently touching; empty when none are.
+    Touch(Vec<Contact>),
     Ping { t: u64 },
     RequestKeyframe,
     /// The frame with this `pts_us` has been decoded.
@@ -172,6 +185,15 @@ impl Message {
                 w.u8(p.tool as u8);
                 w.u8(p.buttons);
                 w.u8(p.contact as u8 | (p.in_range as u8) << 1);
+            }
+            Message::Touch(contacts) => {
+                w.u8(tag::TOUCH);
+                w.u8(contacts.len().min(255) as u8);
+                for c in contacts.iter().take(255) {
+                    w.u8(c.id);
+                    w.u16(c.x);
+                    w.u16(c.y);
+                }
             }
             Message::Ping { t } => {
                 w.u8(tag::PING);
@@ -254,6 +276,13 @@ impl Message {
                     contact: flags & 1 != 0,
                     in_range: flags & 2 != 0,
                 })
+            }
+            tag::TOUCH => {
+                let n = r.u8()?;
+                let contacts = (0..n)
+                    .map(|_| Ok(Contact { id: r.u8()?, x: r.u16()?, y: r.u16()? }))
+                    .collect::<Result<_, DecodeError>>()?;
+                Message::Touch(contacts)
             }
             tag::PING => Message::Ping { t: r.u64()? },
             tag::REQUEST_KEYFRAME => Message::RequestKeyframe,

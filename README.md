@@ -12,7 +12,8 @@ Use an Android pen tablet as a second (or mirrored) monitor and a pressure-sensi
 - Milestone 0 (virtual monitor + capture): works. COSMIC needs a cosmic-comp fix for display-only DRM devices whose EGL render node belongs to another GPU (vkms through Mesa's kmsro); without it the vkms output stays black and the compositor logs `NoDevice` renderer errors. GNOME and KDE are untested.
 - Milestone 1 (encode + web viewer + streaming): works end to end on a real tablet over USB (~40 fps with motion, 6–8 ms round trip).
 - Milestone 2 (pen through uinput): works on COSMIC; pressure, tilt, eraser and barrel buttons. Capture polls for new buffers every 4 ms so flips aren't missed.
-- Next: LAN mode (HTTPS + pairing), hardware encoder, touch.
+- Milestone 3: LAN mode (HTTPS + pairing token), finger touch as a multitouch device with palm rejection, opt-in V4L2 hardware encoder.
+- Next: native Android client (MediaCodec) to get past Chrome's ~40 fps decode limit.
 
 ## Performance
 
@@ -60,14 +61,26 @@ The virtual monitor starts at 1024×768. Set its mode in display settings:
 
 Rebuilding the binary drops its capability, so rerun `setup` after a rebuild.
 
-## Pen
+## Wi-Fi
 
-When the tablet connects, tabula creates a uinput tablet named **tabula pen** (screen tablet, pressure, tilt, eraser, barrel buttons). `tabula setup` installs a udev rule that lets the logged-in user create it; `--view-only` disables it.
+```fish
+./target/release/tabula run --lan
+```
 
-Pen positions cover the whole streamed monitor, so the desktop has to map the device onto that monitor:
+This also serves HTTPS on port 7544 on all interfaces and prints a URL and QR code with a pairing token. Browsers only allow WebCodecs on secure origins, so the LAN side uses a self-signed certificate: accept it once on the tablet (Chrome: *Advanced → Proceed*). The certificate and token live in `~/.local/state/tabula/`. Connections without the token are refused, and `--new-token` revokes the old one. USB (`localhost:7543`) needs no token, since only adb can reach it.
+
+## Encoders
+
+`--encoder x264` (default), `openh264`, or `v4l2` for the hardware encoder. On the Snapdragon X1E (Qualcomm Iris), the hardware encoder takes about half the CPU of x264 at the same ~5 ms latency, but on kernel 7.2.5 it hung under load and the driver logged a UBSAN out-of-bounds read in `iris_buffer.c`, so it's opt-in. tabula gives up on an unresponsive encoder after 3 s instead of hanging. Reloading the `qcom_iris` module (or rebooting) recovers the device.
+
+## Pen and touch
+
+When the tablet connects, tabula creates two uinput devices: **tabula pen** (screen tablet: pressure, tilt, eraser, barrel buttons) and **tabula touch** (multitouch touchscreen, up to 10 fingers). `tabula setup` installs a udev rule that lets the logged-in user create them; `--view-only` disables both. Touch is ignored while the pen is in range and for 300 ms after it leaves, so a resting palm doesn't click.
+
+Positions cover the whole streamed monitor, so the desktop has to map both devices onto that monitor:
 
 - **Mirror:** map it to the mirrored display. COSMIC maps tablets to the built-in display by default, so nothing needs to be set.
 - **Extend:** map it to the virtual monitor.
   - GNOME: Settings → Wacom Tablet → Map to Monitor
   - KDE: System Settings → Drawing Tablet → Map to screen
-  - COSMIC: in `~/.config/cosmic/com.system76.CosmicComp/v1/input_devices`, add `"tabula pen": (state: Enabled, map_to_output: Some("Virtual-1"))`
+  - COSMIC: in `~/.config/cosmic/com.system76.CosmicComp/v1/input_devices`, add `"tabula pen": (state: Enabled, map_to_output: Some("Virtual-1"))`, and the same for `"tabula touch"`

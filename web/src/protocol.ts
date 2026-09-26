@@ -43,12 +43,15 @@ export type Pen = {
   in_range: boolean;
 };
 
+export type Contact = { id: number; x: number; y: number };
+
 export type StreamConfig = { width: number; height: number; codec: string };
 export type Video = { pts_us: bigint; keyframe: boolean; data: Uint8Array };
 
 export type Message =
   | { type: "Hello"; hello: Hello }
   | { type: "Pen"; pen: Pen }
+  | { type: "Touch"; contacts: Contact[] }
   | { type: "Ping"; t: bigint }
   | { type: "RequestKeyframe" }
   | { type: "Ack"; pts_us: bigint }
@@ -59,6 +62,7 @@ export type Message =
 const Tag = {
   Hello: 0x01,
   Pen: 0x02,
+  Touch: 0x03,
   Ping: 0x04,
   RequestKeyframe: 0x05,
   Ack: 0x06,
@@ -204,6 +208,15 @@ export function encode(msg: Message): Uint8Array<ArrayBuffer> {
       w.u8((p.contact ? 1 : 0) | (p.in_range ? 2 : 0));
       break;
     }
+    case "Touch":
+      w.u8(Tag.Touch);
+      w.u8(Math.min(msg.contacts.length, 255));
+      for (const c of msg.contacts.slice(0, 255)) {
+        w.u8(c.id);
+        w.u16(c.x);
+        w.u16(c.y);
+      }
+      break;
     case "Ping":
       w.u8(Tag.Ping);
       w.u64(msg.t);
@@ -267,6 +280,11 @@ export function decode(buf: Uint8Array): Message | null {
         type: "Pen",
         pen: { x, y, pressure, tilt_x, tilt_y, tool, buttons, contact: (flags & 1) !== 0, in_range: (flags & 2) !== 0 },
       };
+    }
+    case Tag.Touch: {
+      const n = r.u8();
+      const contacts = Array.from({ length: n }, () => ({ id: r.u8(), x: r.u16(), y: r.u16() }));
+      return { type: "Touch", contacts };
     }
     case Tag.Ping:
       return { type: "Ping", t: r.u64() };

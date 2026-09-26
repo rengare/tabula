@@ -32,6 +32,14 @@ const expected: Record<string, Message> = {
       in_range: true,
     },
   },
+  touch: {
+    type: "Touch",
+    contacts: [
+      { id: 0, x: 100, y: 200 },
+      { id: 7, x: 65535, y: 0 },
+    ],
+  },
+  touch_none: { type: "Touch", contacts: [] },
   ping: { type: "Ping", t: 0x0102030405060708n },
   request_keyframe: { type: "RequestKeyframe" },
   ack: { type: "Ack", pts_us: 123456789n },

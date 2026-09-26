@@ -29,6 +29,14 @@ fn samples() -> Vec<(&'static str, Message)> {
                 in_range: true,
             }),
         ),
+        (
+            "touch",
+            Message::Touch(vec![
+                Contact { id: 0, x: 100, y: 200 },
+                Contact { id: 7, x: 65535, y: 0 },
+            ]),
+        ),
+        ("touch_none", Message::Touch(vec![])),
         ("ping", Message::Ping { t: 0x0102_0304_0506_0708 }),
         ("request_keyframe", Message::RequestKeyframe),
         ("ack", Message::Ack { pts_us: 123_456_789 }),

@@ -1,4 +1,4 @@
-//! A virtual pen tablet through uinput. libinput sees a screen tablet
+//! A virtual pen tablet and touchscreen through uinput. libinput sees a screen tablet
 //! (`INPUT_PROP_DIRECT`, like a Cintiq), so every compositor exposes it as a
 //! regular tablet with pressure, tilt and eraser. Mapping it onto the virtual
 //! monitor is the desktop's usual "map tablet to monitor" setting.
@@ -9,14 +9,18 @@ use evdev::{
     AbsInfo, AbsoluteAxisCode, AttributeSet, BusType, EventType, InputEvent, InputId, KeyCode,
     PropType, UinputAbsSetup,
 };
-use tabula_protocol::{Pen, Tool, buttons};
+use tabula_protocol::{Contact, Pen, Tool, buttons};
 
-/// Name the device shows up under; desktops remember the monitor mapping by it.
+/// Names the devices show up under; desktops remember the monitor mapping by them.
 pub const DEVICE_NAME: &str = "tabula pen";
+pub const TOUCH_DEVICE_NAME: &str = "tabula touch";
 
 /// pid.codes test VID/PID for open source prototypes.
 const VENDOR: u16 = 0x1209;
 const PRODUCT: u16 = 0x0001;
+const TOUCH_PRODUCT: u16 = 0x0002;
+/// Simultaneous fingers the touchscreen reports.
+const MAX_SLOTS: usize = 10;
 
 /// Positions arrive normalized to 0..=65535 and are passed through unchanged,
 /// so the axis range doesn't depend on the stream resolution.
@@ -162,6 +166,121 @@ impl PenState {
     }
 }
 
+/// Physical size in units per mm for a normalized 0..=65535 axis.
+fn resolution(size: PhysicalSize) -> (i32, i32) {
+    let res = |mm: f32| (POS_MAX as f32 / mm).round().max(1.0) as i32;
+    (res(size.width_mm), res(size.height_mm))
+}
+
+pub struct TouchDevice {
+    device: VirtualDevice,
+    state: TouchState,
+}
+
+impl TouchDevice {
+    pub fn new(size: PhysicalSize) -> Result<Self> {
+        let (res_x, res_y) = resolution(size);
+        let axis = |code, min, max, res| UinputAbsSetup::new(code, AbsInfo::new(0, min, max, 0, 0, res));
+        let device = VirtualDevice::builder()
+            .context("opening /dev/uinput (run `sudo tabula setup` to allow access)")?
+            .name(TOUCH_DEVICE_NAME)
+            .input_id(InputId::new(BusType::BUS_VIRTUAL, VENDOR, TOUCH_PRODUCT, 1))
+            .with_properties(&AttributeSet::from_iter([PropType::DIRECT]))?
+            .with_keys(&AttributeSet::from_iter([KeyCode::BTN_TOUCH]))?
+            .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_X, 0, POS_MAX, res_x))?
+            .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_Y, 0, POS_MAX, res_y))?
+            .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_MT_SLOT, 0, MAX_SLOTS as i32 - 1, 0))?
+            .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_MT_TRACKING_ID, 0, 65535, 0))?
+            .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_MT_POSITION_X, 0, POS_MAX, res_x))?
+            .with_absolute_axis(&axis(AbsoluteAxisCode::ABS_MT_POSITION_Y, 0, POS_MAX, res_y))?
+            .build()
+            .context("creating uinput touch device")?;
+        tracing::info!(name = TOUCH_DEVICE_NAME, "virtual touchscreen created");
+        Ok(Self { device, state: TouchState::default() })
+    }
+
+    pub fn touch(&mut self, contacts: &[Contact]) -> Result<()> {
+        if let Some(frame) = self.state.update(contacts) {
+            self.device.emit(&frame).context("writing touch events")?;
+        }
+        Ok(())
+    }
+
+    pub fn release(&mut self) -> Result<()> {
+        self.touch(&[])
+    }
+}
+
+impl Drop for TouchDevice {
+    fn drop(&mut self) {
+        let _ = self.release();
+    }
+}
+
+/// Maps protocol contacts onto multitouch type B slots.
+#[derive(Debug, Default)]
+struct TouchState {
+    /// Client contact id held by each slot.
+    slots: [Option<u8>; MAX_SLOTS],
+    next_tracking_id: u16,
+}
+
+impl TouchState {
+    /// One event frame for the new contact set, or `None` if nothing changed.
+    fn update(&mut self, contacts: &[Contact]) -> Option<Vec<InputEvent>> {
+        let mut events = Vec::new();
+        let mut current = None;
+        let mut select = |events: &mut Vec<InputEvent>, slot: usize| {
+            if current != Some(slot) {
+                events.push(abs(AbsoluteAxisCode::ABS_MT_SLOT, slot as i32));
+                current = Some(slot);
+            }
+        };
+        // Lifted fingers.
+        for slot in 0..MAX_SLOTS {
+            if let Some(id) = self.slots[slot]
+                && !contacts.iter().any(|c| c.id == id)
+            {
+                select(&mut events, slot);
+                events.push(abs(AbsoluteAxisCode::ABS_MT_TRACKING_ID, -1));
+                self.slots[slot] = None;
+            }
+        }
+        // Moved and new fingers; fingers beyond MAX_SLOTS are ignored.
+        for c in contacts {
+            match self.slots.iter().position(|s| *s == Some(c.id)) {
+                Some(slot) => select(&mut events, slot),
+                None => {
+                    let Some(slot) = self.slots.iter().position(Option::is_none) else { continue };
+                    self.slots[slot] = Some(c.id);
+                    select(&mut events, slot);
+                    events.push(abs(AbsoluteAxisCode::ABS_MT_TRACKING_ID, self.next_tracking_id as i32));
+                    self.next_tracking_id = (self.next_tracking_id + 1) % 65535;
+                }
+            }
+            events.push(abs(AbsoluteAxisCode::ABS_MT_POSITION_X, c.x as i32));
+            events.push(abs(AbsoluteAxisCode::ABS_MT_POSITION_Y, c.y as i32));
+        }
+        if events.is_empty() {
+            return None;
+        }
+        // Single-touch emulation for clients that don't read MT axes: follow
+        // the finger in the lowest occupied slot.
+        let first = self
+            .slots
+            .iter()
+            .flatten()
+            .next()
+            .and_then(|id| contacts.iter().find(|c| c.id == *id));
+        events.push(key(KeyCode::BTN_TOUCH, first.is_some()));
+        if let Some(c) = first {
+            events.push(abs(AbsoluteAxisCode::ABS_X, c.x as i32));
+            events.push(abs(AbsoluteAxisCode::ABS_Y, c.y as i32));
+        }
+        Some(events)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,6 +338,51 @@ mod tests {
         p.pressure = 1;
         let f = s.update(&p);
         assert_eq!(value(&f[0], EventType::ABSOLUTE, AbsoluteAxisCode::ABS_PRESSURE.0), Some(1));
+    }
+
+    fn contact(id: u8, x: u16) -> Contact {
+        Contact { id, x, y: 500 }
+    }
+
+    fn values(frame: &[InputEvent], code: AbsoluteAxisCode) -> Vec<i32> {
+        frame
+            .iter()
+            .filter(|e| e.event_type() == EventType::ABSOLUTE && e.code() == code.0)
+            .map(|e| e.value())
+            .collect()
+    }
+
+    #[test]
+    fn two_fingers_down_move_and_lift() {
+        let mut t = TouchState::default();
+        let down = t.update(&[contact(3, 100)]).unwrap();
+        assert_eq!(values(&down, AbsoluteAxisCode::ABS_MT_SLOT), vec![0]);
+        assert_eq!(values(&down, AbsoluteAxisCode::ABS_MT_TRACKING_ID), vec![0]);
+        assert_eq!(value(&down, EventType::KEY, KeyCode::BTN_TOUCH.0), Some(1));
+
+        let second = t.update(&[contact(3, 110), contact(9, 900)]).unwrap();
+        assert_eq!(values(&second, AbsoluteAxisCode::ABS_MT_SLOT), vec![0, 1]);
+        assert_eq!(values(&second, AbsoluteAxisCode::ABS_MT_TRACKING_ID), vec![1]);
+        assert_eq!(values(&second, AbsoluteAxisCode::ABS_MT_POSITION_X), vec![110, 900]);
+
+        // First finger lifts: its slot ends, single-touch emulation follows the other.
+        let lift = t.update(&[contact(9, 905)]).unwrap();
+        assert_eq!(values(&lift, AbsoluteAxisCode::ABS_MT_TRACKING_ID), vec![-1]);
+        assert_eq!(values(&lift, AbsoluteAxisCode::ABS_X), vec![905]);
+        assert_eq!(value(&lift, EventType::KEY, KeyCode::BTN_TOUCH.0), Some(1));
+
+        let up = t.update(&[]).unwrap();
+        assert_eq!(values(&up, AbsoluteAxisCode::ABS_MT_TRACKING_ID), vec![-1]);
+        assert_eq!(value(&up, EventType::KEY, KeyCode::BTN_TOUCH.0), Some(0));
+        assert!(t.update(&[]).is_none(), "no contacts twice emits nothing");
+    }
+
+    #[test]
+    fn extra_fingers_beyond_slots_are_ignored() {
+        let mut t = TouchState::default();
+        let many: Vec<_> = (0..12).map(|i| contact(i, i as u16)).collect();
+        let f = t.update(&many).unwrap();
+        assert_eq!(values(&f, AbsoluteAxisCode::ABS_MT_TRACKING_ID).len(), MAX_SLOTS);
     }
 
     #[test]

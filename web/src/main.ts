@@ -6,6 +6,7 @@ import {
   Tool,
   decode,
   encode,
+  type Contact,
   type Message,
   type Pen,
   type StreamConfig,
@@ -116,7 +117,13 @@ function connect() {
         proto_ver: PROTOCOL_VERSION,
         client_kind: ClientKind.Web,
         features:
-          Features.Pen | Features.Hover | Features.Eraser | Features.BarrelButton | Features.Tilt | Features.Acks,
+          Features.Pen |
+          Features.Hover |
+          Features.Eraser |
+          Features.BarrelButton |
+          Features.Tilt |
+          Features.Touch |
+          Features.Acks,
         screen_w: Math.round(screen.width * dpr),
         screen_h: Math.round(screen.height * dpr),
         dpi: Math.round(96 * dpr),
@@ -199,10 +206,70 @@ function penFrom(e: PointerEvent, inRange: boolean): Pen {
   };
 }
 
+// ---- touch -------------------------------------------------------------------
+
+/** Touch is ignored this long after the pen leaves, so a resting palm doesn't click. */
+const PALM_GRACE_MS = 300;
+let penInRange = false;
+let penLeftAt = -Infinity;
+/** Fingers currently down, by pointerId. */
+const touches = new Map<number, Contact>();
+
+function palmRejected() {
+  return penInRange || performance.now() - penLeftAt < PALM_GRACE_MS;
+}
+
+function sendTouches() {
+  send({ type: "Touch", contacts: [...touches.values()] });
+}
+
+function freeTouchId(): number | undefined {
+  const used = new Set([...touches.values()].map((c) => c.id));
+  for (let id = 0; id < 255; id++) if (!used.has(id)) return id;
+  return undefined;
+}
+
+function onTouch(e: PointerEvent) {
+  e.preventDefault();
+  const known = touches.get(e.pointerId);
+  switch (e.type) {
+    case "pointerdown": {
+      if (palmRejected()) return;
+      const id = freeTouchId();
+      if (id === undefined) return;
+      canvas.setPointerCapture(e.pointerId);
+      const [x, y] = normalize(e.clientX, e.clientY);
+      touches.set(e.pointerId, { id, x, y });
+      break;
+    }
+    case "pointermove": {
+      if (!known) return;
+      [known.x, known.y] = normalize(e.clientX, e.clientY);
+      break;
+    }
+    default: // up, cancel, leave
+      if (!known) return;
+      touches.delete(e.pointerId);
+  }
+  sendTouches();
+}
+
+function cancelTouches() {
+  if (touches.size === 0) return;
+  touches.clear();
+  sendTouches();
+}
+
+// ---- pen & dispatch -------------------------------------------------------------
+
 function onPointer(e: PointerEvent) {
+  if (e.pointerType === "touch") return onTouch(e);
   if (!isPen(e)) return;
   e.preventDefault();
   const inRange = e.type !== "pointerleave" && e.type !== "pointercancel" && e.type !== "pointerout";
+  if (inRange && !penInRange) cancelTouches();
+  if (!inRange && penInRange) penLeftAt = performance.now();
+  penInRange = inRange;
   if (e.type === "pointerdown") canvas.setPointerCapture(e.pointerId);
   const samples = e.type === "pointermove" && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   for (const s of samples.length ? samples : [e]) send({ type: "Pen", pen: penFrom(s, inRange) });
