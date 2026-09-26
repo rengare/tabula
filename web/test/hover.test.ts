@@ -2,33 +2,43 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { HoverFilter } from "../src/hover.ts";
 
+const NO_SMOOTHING = { minCutoff: 1e9, beta: 0, dCutoff: 1 };
+const run = (f: HoverFilter, pts: [number, number][], contact = false) =>
+  pts.map(([x, y], i) => f.filter(x, y, contact, i * 0.01));
+
 // Hover samples recorded with a palm on the screen: y spikes and decays back.
 test("drops a spike and its decay", () => {
-  const f = new HoverFilter();
-  const ys = [9498, 17539, 13766, 9777, 9800];
-  assert.deepEqual(ys.map((y) => f.accept(39000, y, false)), [true, false, false, true, true]);
+  const out = run(new HoverFilter(NO_SMOOTHING), [9498, 17539, 13766, 9777, 9800].map((y) => [39000, y]));
+  assert.deepEqual(out.map((p) => p !== null), [true, false, false, true, true]);
 });
 
-test("drops oscillating noise", () => {
-  const f = new HoverFilter();
-  const pts = [[10012, 42336], [17049, 42368], [13686, 43118], [10400, 42400]];
-  assert.deepEqual(pts.map(([x, y]) => f.accept(x, y, false)), [true, false, false, true]);
+test("drops a spike that lasts two samples", () => {
+  const out = run(new HoverFilter(NO_SMOOTHING), [[8371, 1864], [15621, 2343], [15500, 2300], [9177, 2388]]);
+  assert.deepEqual(out.map((p) => p !== null), [true, false, false, true]);
 });
 
 test("follows a real move made of small steps", () => {
-  const f = new HoverFilter();
-  for (let x = 0; x < 30000; x += 1500) assert.ok(f.accept(x, 5000, false));
+  const f = new HoverFilter(NO_SMOOTHING);
+  for (let x = 0; x < 30000; x += 1500) assert.ok(f.filter(x, 5000, false, x / 1e5));
 });
 
-test("accepts a jump confirmed by the next sample", () => {
-  const f = new HoverFilter();
-  assert.ok(f.accept(1000, 1000, false));
-  assert.ok(!f.accept(30000, 30000, false));
-  assert.ok(f.accept(30500, 30200, false));
+test("jumps to a new place confirmed by three samples", () => {
+  const out = run(new HoverFilter(NO_SMOOTHING), [[1000, 1000], [30000, 30000], [30300, 30100], [30500, 30200]]);
+  assert.deepEqual(out.map((p) => p !== null), [true, false, false, true]);
+  assert.deepEqual(out[3], { x: 30500, y: 30200 });
 });
 
-test("never filters tip contact", () => {
+test("smooths jitter while hovering still", () => {
   const f = new HoverFilter();
-  assert.ok(f.accept(1000, 1000, false));
-  assert.ok(f.accept(40000, 40000, true));
+  const jittery = Array.from({ length: 60 }, (_, i): [number, number] => [20000 + (i % 2 ? 1500 : -1500), 20000]);
+  const out = run(f, jittery).filter((p) => p !== null);
+  const tail = out.slice(-20).map((p) => p!.x);
+  assert.ok(Math.max(...tail) - Math.min(...tail) < 600, `still jittering: ${Math.min(...tail)}..${Math.max(...tail)}`);
+});
+
+test("never filters or smooths tip contact", () => {
+  const f = new HoverFilter();
+  assert.ok(f.filter(1000, 1000, false, 0));
+  assert.deepEqual(f.filter(40000, 40000, true, 0.01), { x: 40000, y: 40000 });
+  assert.deepEqual(f.filter(40100, 40000, true, 0.02), { x: 40100, y: 40000 });
 });

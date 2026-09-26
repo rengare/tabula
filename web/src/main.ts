@@ -345,9 +345,12 @@ function onPointer(e: PointerEvent) {
   const samples = e.type === "pointermove" && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   for (const s of samples.length ? samples : [e]) {
     const pen = penFrom(s, true);
+    const filtered = hoverFilter.filter(pen.x, pen.y, pen.contact, s.timeStamp / 1000);
     // Button and contact changes always go through; hover glitches don't.
     const changed = !lastPen || pen.contact !== lastPen.contact || pen.buttons !== lastPen.buttons || pen.tool !== lastPen.tool;
-    if (!hoverFilter.accept(pen.x, pen.y, pen.contact) && !changed) continue;
+    if (!filtered && !changed) continue;
+    if (filtered) [pen.x, pen.y] = [filtered.x, filtered.y];
+    else if (lastPen) [pen.x, pen.y] = [lastPen.x, lastPen.y];
     lastPen = pen;
     send({ type: "Pen", pen });
   }

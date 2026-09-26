@@ -14,7 +14,6 @@ A Kotlin app next to the web client, talking to the same server.
 ## Other
 
 - **Privileged capture helper:** every rebuild of `tabula` drops `CAP_SYS_ADMIN` and needs `setcap` again. Move the DRM capture into a small helper that rarely changes and hands dma-buf fds to the unprivileged server.
-- **Hover smoothing:** the hover glitch filter (`web/src/hover.ts`) leaves a few smaller jumps in sustained palm noise. If they're still visible, add light smoothing for hover only, at the cost of some cursor lag.
 - **GPU color conversion:** with the hardware encoder, most of the remaining CPU cost is the RGB→NV12 `videoconvert`. Import the dma-buf and convert on the GPU (or hand it to the encoder directly).
 - **Iris hardware encoder:** on kernel 7.2.5 the Qualcomm Iris encoder hung under load, and the driver logged a UBSAN out-of-bounds read at `iris_buffer.c:932` (`metadata_idx` reaches 32 in `iris_set_ts_metadata` and isn't wrapped until the next write). Report it to linux-media, then reconsider making `--encoder v4l2` the default.
 - **COSMIC tablet proximity:** cosmic-comp calls `set_grab` before `proximity_in` when the pen enters over a surface without tablet support (`src/input/mod.rs`), so smithay logs "set_grab called with an out of proximity tool" and the pointer emulation grab only starts on the next motion. Worth an upstream issue.
