@@ -11,6 +11,7 @@ import {
   type Pen,
   type StreamConfig,
 } from "./protocol.ts";
+import { HoverFilter } from "./hover.ts";
 
 const params = new URLSearchParams(location.search);
 /** `?mouse=1` treats mouse input as a pen, for testing on a desktop browser. */
@@ -261,6 +262,7 @@ function palmRejected() {
 setInterval(() => {
   if (penInRange && !penContact && lastPen && performance.now() - penLastSeen > PEN_RANGE_TIMEOUT_MS) {
     penInRange = false;
+    hoverFilter.reset();
     send({ type: "Pen", pen: { ...lastPen, contact: false, pressure: 0, in_range: false } });
   }
 }, 250);
@@ -308,19 +310,46 @@ function cancelTouches() {
 
 // ---- pen & dispatch -------------------------------------------------------------
 
+const hoverFilter = new HoverFilter();
+/**
+ * Chrome reports the pen leaving range right after every lift and entering
+ * again ~10 ms later; a short grace period keeps that from reaching the
+ * desktop as a proximity out/in on every stroke.
+ */
+const LEAVE_GRACE_MS = 80;
+let leaveTimer: ReturnType<typeof setTimeout> | undefined;
+
 function onPointer(e: PointerEvent) {
   if (e.pointerType === "touch") return onTouch(e);
   if (!isPen(e)) return;
   e.preventDefault();
   const inRange = e.type !== "pointerleave" && e.type !== "pointercancel" && e.type !== "pointerout";
-  if (inRange && !penInRange) cancelTouches();
-  penInRange = inRange;
   penLastSeen = performance.now();
+  if (!inRange) {
+    if (penInRange && leaveTimer === undefined) {
+      leaveTimer = setTimeout(() => {
+        leaveTimer = undefined;
+        penInRange = false;
+        penContact = false;
+        hoverFilter.reset();
+        if (lastPen) send({ type: "Pen", pen: { ...lastPen, contact: false, pressure: 0, in_range: false } });
+      }, LEAVE_GRACE_MS);
+    }
+    return;
+  }
+  clearTimeout(leaveTimer);
+  leaveTimer = undefined;
+  if (!penInRange) cancelTouches();
+  penInRange = true;
   if (e.type === "pointerdown") canvas.setPointerCapture(e.pointerId);
   const samples = e.type === "pointermove" && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
   for (const s of samples.length ? samples : [e]) {
-    lastPen = penFrom(s, inRange);
-    send({ type: "Pen", pen: lastPen });
+    const pen = penFrom(s, true);
+    // Button and contact changes always go through; hover glitches don't.
+    const changed = !lastPen || pen.contact !== lastPen.contact || pen.buttons !== lastPen.buttons || pen.tool !== lastPen.tool;
+    if (!hoverFilter.accept(pen.x, pen.y, pen.contact) && !changed) continue;
+    lastPen = pen;
+    send({ type: "Pen", pen });
   }
   penContact = lastPen?.contact ?? false;
 }
