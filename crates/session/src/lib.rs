@@ -48,6 +48,9 @@ impl InputHandler for LogInput {
     fn pen(&mut self, pen: &Pen) {
         tracing::trace!(?pen, "pen");
     }
+    fn touch(&mut self, contacts: &[Contact]) {
+        tracing::debug!(?contacts, "touch");
+    }
 }
 
 #[derive(Debug, Clone)]

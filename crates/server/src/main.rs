@@ -48,6 +48,10 @@ enum Cmd {
         /// Log per-stage latency percentiles every few seconds.
         #[arg(long)]
         stats: bool,
+        /// Serve the web client from this directory (e.g. web/dist) instead of
+        /// the embedded copy, for client development without rebuilding.
+        #[arg(long)]
+        web_dir: Option<PathBuf>,
         /// Also serve HTTPS on all interfaces for tablets on the same network.
         #[arg(long)]
         lan: bool,
@@ -101,7 +105,11 @@ fn main() -> Result<()> {
             lan,
             lan_port,
             new_token,
+            web_dir,
         } => {
+            if let Some(dir) = web_dir {
+                ws::serve_web_from(dir);
+            }
             let kind = match encoder {
                 Some(kind) => {
                     kind.check().with_context(|| format!("encoder {kind:?} is not usable"))?;

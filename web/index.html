@@ -15,6 +15,11 @@
     #overlay[hidden], #hud[hidden] { display: none; }
     #overlay button { font: inherit; font-size: 18px; padding: 12px 24px; border-radius: 8px;
       border: 1px solid #555; background: #222; color: #eee; }
+    #modes { position: fixed; top: 6px; left: 6px; display: flex; gap: 6px; z-index: 2; }
+    #modes button { width: 40px; height: 40px; padding: 0; font-size: 20px; line-height: 1;
+      border-radius: 8px; border: 1px solid #555; background: rgba(20,20,20,.55); color: #aaa;
+      touch-action: manipulation; }
+    #modes button[aria-pressed="true"] { background: rgba(60,110,200,.85); border-color: #8ab; color: #fff; }
     #hud { position: fixed; top: 4px; right: 6px; font: 12px ui-monospace, monospace;
       color: #8f8; background: rgba(0,0,0,.6); padding: 2px 6px; border-radius: 4px; pointer-events: none; }
   </style>
@@ -24,6 +29,10 @@
   <div id="overlay">
     <div id="status">Connecting…</div>
     <button id="start">Enter fullscreen</button>
+  </div>
+  <div id="modes" role="group" aria-label="Input mode">
+    <button id="mode-pen" title="Pen only: fingers are ignored" aria-pressed="false">✎</button>
+    <button id="mode-touch" title="Touch: fingers act as a touchscreen, pen still works" aria-pressed="true">☝</button>
   </div>
   <div id="hud" hidden></div>
   <script src="main.js"></script>

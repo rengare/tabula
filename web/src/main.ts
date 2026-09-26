@@ -208,16 +208,62 @@ function penFrom(e: PointerEvent, inRange: boolean): Pen {
 
 // ---- touch -------------------------------------------------------------------
 
-/** Touch is ignored this long after the pen leaves, so a resting palm doesn't click. */
+/** Touch is ignored this long after the last pen event, so a resting palm doesn't click. */
 const PALM_GRACE_MS = 300;
+/**
+ * Not every browser sends pointerleave when a hovering pen leaves range, so
+ * range is derived from how recently the pen was seen instead: a pen in
+ * range keeps producing hover moves.
+ */
+const PEN_RANGE_TIMEOUT_MS = 1000;
 let penInRange = false;
-let penLeftAt = -Infinity;
+let penContact = false;
+let penLastSeen = -Infinity;
+let lastPen: Pen | null = null;
 /** Fingers currently down, by pointerId. */
 const touches = new Map<number, Contact>();
 
-function palmRejected() {
-  return penInRange || performance.now() - penLeftAt < PALM_GRACE_MS;
+// "pen": fingers are ignored entirely (rest your hand on the screen while drawing).
+// "touch": fingers act as a touchscreen, with palm rejection while the pen is near.
+type InputMode = "pen" | "touch";
+const modeButtons = {
+  pen: document.getElementById("mode-pen")!,
+  touch: document.getElementById("mode-touch")!,
+};
+let inputMode: InputMode = "touch";
+
+function setInputMode(mode: InputMode) {
+  inputMode = mode;
+  for (const [m, button] of Object.entries(modeButtons)) button.setAttribute("aria-pressed", String(m === mode));
+  if (mode === "pen") cancelTouches();
+  try {
+    localStorage.setItem("tabula.inputMode", mode);
+  } catch {
+    /* storage unavailable; the choice just isn't remembered */
+  }
 }
+
+for (const [mode, button] of Object.entries(modeButtons)) {
+  button.addEventListener("click", () => setInputMode(mode as InputMode));
+}
+try {
+  const saved = localStorage.getItem("tabula.inputMode");
+  if (saved === "pen" || saved === "touch") inputMode = saved;
+} catch {
+  /* default mode */
+}
+
+function palmRejected() {
+  return inputMode === "pen" || penContact || performance.now() - penLastSeen < PALM_GRACE_MS;
+}
+
+/** Takes a pen that went quiet out of proximity, so the desktop doesn't keep it forever. */
+setInterval(() => {
+  if (penInRange && !penContact && lastPen && performance.now() - penLastSeen > PEN_RANGE_TIMEOUT_MS) {
+    penInRange = false;
+    send({ type: "Pen", pen: { ...lastPen, contact: false, pressure: 0, in_range: false } });
+  }
+}, 250);
 
 function sendTouches() {
   send({ type: "Touch", contacts: [...touches.values()] });
@@ -268,11 +314,15 @@ function onPointer(e: PointerEvent) {
   e.preventDefault();
   const inRange = e.type !== "pointerleave" && e.type !== "pointercancel" && e.type !== "pointerout";
   if (inRange && !penInRange) cancelTouches();
-  if (!inRange && penInRange) penLeftAt = performance.now();
   penInRange = inRange;
+  penLastSeen = performance.now();
   if (e.type === "pointerdown") canvas.setPointerCapture(e.pointerId);
   const samples = e.type === "pointermove" && e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
-  for (const s of samples.length ? samples : [e]) send({ type: "Pen", pen: penFrom(s, inRange) });
+  for (const s of samples.length ? samples : [e]) {
+    lastPen = penFrom(s, inRange);
+    send({ type: "Pen", pen: lastPen });
+  }
+  penContact = lastPen?.contact ?? false;
 }
 
 for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel", "pointerleave"]) {
@@ -303,6 +353,8 @@ document.addEventListener("fullscreenchange", () => {
     overlay.hidden = false;
   }
 });
+
+setInputMode(inputMode);
 
 if (!("VideoDecoder" in window)) {
   setStatus("This browser has no WebCodecs support (needs Chrome/Edge 94+, Firefox 130+, or a secure origin)");

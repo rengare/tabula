@@ -43,8 +43,29 @@ fn same_token(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// When set, web assets are served from this directory instead of the copy
+/// embedded at build time, so client changes only need `npm run build`.
+static WEB_DIR: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+pub fn serve_web_from(dir: std::path::PathBuf) {
+    let _ = WEB_DIR.set(dir);
+}
+
 async fn asset(path: impl AsRef<str>) -> Response {
     let path = path.as_ref();
+    if let Some(dir) = WEB_DIR.get() {
+        // Paths come from the URL: refuse anything that could leave `dir`.
+        if path.split('/').any(|c| c == ".." || c.is_empty()) {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        return match tokio::fs::read(dir.join(path)).await {
+            Ok(data) => {
+                let mime = mime_guess::from_path(path).first_or_octet_stream();
+                ([(header::CONTENT_TYPE, mime.as_ref().to_owned())], data).into_response()
+            }
+            Err(_) => StatusCode::NOT_FOUND.into_response(),
+        };
+    }
     match Assets::get(path) {
         Some(file) => {
             let mime = mime_guess::from_path(path).first_or_octet_stream();
