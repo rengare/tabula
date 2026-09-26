@@ -13,7 +13,7 @@ Use an Android pen tablet as a second (or mirrored) monitor and a pressure-sensi
 - Milestone 1 (encode + web viewer + streaming): works end to end on a real tablet over USB (~40 fps with motion, 6–8 ms round trip).
 - Milestone 2 (pen through uinput): works on COSMIC; pressure, tilt, eraser and barrel buttons. Capture polls for new buffers every 4 ms so flips aren't missed.
 - Milestone 3: LAN mode (HTTPS + pairing token), finger touch as a multitouch device with palm rejection, opt-in V4L2 hardware encoder.
-- Next: native Android client (MediaCodec) to get past Chrome's ~40 fps decode limit.
+- Next: see [docs/backlog.md](docs/backlog.md), starting with a native Android client (MediaCodec) to get past Chrome's ~40 fps decode limit.
 
 ## Performance
 
