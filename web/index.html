@@ -15,9 +15,12 @@
     #overlay[hidden], #hud[hidden] { display: none; }
     #overlay button { font: inherit; font-size: 18px; padding: 12px 24px; border-radius: 8px;
       border: 1px solid #555; background: #222; color: #eee; }
-    #modes { position: fixed; top: 6px; left: 6px; display: flex; gap: 6px; z-index: 2; }
-    #modes button { width: 40px; height: 40px; padding: 0; font-size: 20px; line-height: 1;
-      border-radius: 8px; border: 1px solid #555; background: rgba(20,20,20,.55); color: #aaa;
+    /* Below the desktop's top panel, so the buttons don't cover it. */
+    #modes { position: fixed; top: 48px; left: 6px; display: flex; flex-direction: column; gap: 4px;
+      z-index: 2; opacity: .6; }
+    #modes:active, #modes:focus-within { opacity: 1; }
+    #modes button { width: 28px; height: 28px; padding: 0; font-size: 14px; line-height: 1;
+      border-radius: 6px; border: 1px solid #555; background: rgba(20,20,20,.55); color: #aaa;
       touch-action: manipulation; }
     #modes button[aria-pressed="true"] { background: rgba(60,110,200,.85); border-color: #8ab; color: #fff; }
     #hud { position: fixed; top: 4px; right: 6px; font: 12px ui-monospace, monospace;
