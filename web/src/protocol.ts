@@ -13,6 +13,7 @@ export const Features = {
   BarrelButton: 1 << 3,
   Tilt: 1 << 4,
   Touch: 1 << 5,
+  Acks: 1 << 6,
 } as const;
 
 export const Tool = { Pen: 0, Eraser: 1 } as const;
@@ -50,6 +51,7 @@ export type Message =
   | { type: "Pen"; pen: Pen }
   | { type: "Ping"; t: bigint }
   | { type: "RequestKeyframe" }
+  | { type: "Ack"; pts_us: bigint }
   | { type: "StreamConfig"; config: StreamConfig }
   | { type: "Video"; video: Video }
   | { type: "Pong"; t: bigint };
@@ -59,6 +61,7 @@ const Tag = {
   Pen: 0x02,
   Ping: 0x04,
   RequestKeyframe: 0x05,
+  Ack: 0x06,
   StreamConfig: 0x81,
   Video: 0x82,
   Pong: 0x83,
@@ -208,6 +211,10 @@ export function encode(msg: Message): Uint8Array<ArrayBuffer> {
     case "RequestKeyframe":
       w.u8(Tag.RequestKeyframe);
       break;
+    case "Ack":
+      w.u8(Tag.Ack);
+      w.u64(msg.pts_us);
+      break;
     case "StreamConfig":
       w.u8(Tag.StreamConfig);
       w.u16(msg.config.width);
@@ -265,6 +272,8 @@ export function decode(buf: Uint8Array): Message | null {
       return { type: "Ping", t: r.u64() };
     case Tag.RequestKeyframe:
       return { type: "RequestKeyframe" };
+    case Tag.Ack:
+      return { type: "Ack", pts_us: r.u64() };
     case Tag.StreamConfig:
       return { type: "StreamConfig", config: { width: r.u16(), height: r.u16(), codec: r.str8() } };
     case Tag.Video:

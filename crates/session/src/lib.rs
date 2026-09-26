@@ -10,8 +10,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tabula_capture::FrameSource;
 use tabula_encode::{AccessUnit, Encoder, EncoderOptions, codec_string};
-use tabula_protocol::{DecodeError, Hello, Message, PROTOCOL_VERSION, Pen, StreamConfig, Video};
+use tabula_protocol::{
+    DecodeError, Features, Hello, Message, PROTOCOL_VERSION, Pen, StreamConfig, Video,
+};
 use tokio::sync::mpsc;
+
+mod stats;
+use stats::Stats;
+
+mod window;
+use window::InFlight;
 
 pub trait MessageSink: Send {
     fn send(&mut self, msg: Message) -> impl Future<Output = Result<()>> + Send;
@@ -44,6 +52,11 @@ impl InputHandler for LogInput {
 pub struct SessionOptions {
     pub encoder: EncoderOptions,
     pub fps: u32,
+    /// Log per-stage latency percentiles every few seconds.
+    pub stats: bool,
+    /// Frames allowed in flight (encoding, queued, sent but not yet decoded)
+    /// for clients that acknowledge frames. 0 disables flow control.
+    pub max_in_flight: usize,
 }
 
 /// If the source keeps showing the same buffer, still send a frame this often
@@ -96,14 +109,19 @@ where
 
     let stop = Arc::new(AtomicBool::new(false));
     let want_key = Arc::new(AtomicBool::new(false));
+    let stats = opts.stats.then(|| Arc::new(Stats::new()));
+    let in_flight = (hello.features.contains(Features::ACKS) && opts.max_in_flight > 0)
+        .then(|| Arc::new(InFlight::new(opts.max_in_flight)));
     let (tx, mut rx) = mpsc::channel::<Out>(OUTPUT_QUEUE);
     let producer = {
-        let (stop, want_key) = (stop.clone(), want_key.clone());
+        let (stop, want_key, stats, in_flight) =
+            (stop.clone(), want_key.clone(), stats.clone(), in_flight.clone());
         std::thread::Builder::new()
             .name("tabula-capture".into())
             .spawn(move || {
-                let result = make_source()
-                    .and_then(|source| produce(source, &opts, &stop, &want_key, tx));
+                let result = make_source().and_then(|source| {
+                    produce(source, &opts, &stop, &want_key, stats.as_ref(), in_flight.as_ref(), tx)
+                });
                 if let Err(e) = &result {
                     tracing::error!("capture/encode stopped: {e:#}");
                 }
@@ -120,12 +138,16 @@ where
                         sink.send(Message::StreamConfig(c)).await?;
                     }
                     Some(Out::Video(au)) => {
+                        let (pts, bytes) = (au.pts_us, au.data.len());
                         sink.send(Message::Video(Video {
                             pts_us: au.pts_us,
                             keyframe: au.keyframe,
                             data: au.data,
                         }))
                         .await?;
+                        if let Some(stats) = &stats {
+                            stats.frame_sent(pts, bytes);
+                        }
                     }
                     None => bail!("capture stopped"),
                 },
@@ -134,9 +156,25 @@ where
                     Some(Err(DecodeError::UnknownTag(t))) => tracing::debug!("ignoring message tag {t:#04x}"),
                     Some(Err(e)) => bail!("bad message from client: {e}"),
                     Some(Ok(msg)) => match msg {
-                        Message::Pen(p) => input.pen(&p),
+                        Message::Pen(p) => {
+                            if let Some(stats) = &stats {
+                                stats.pen_sample();
+                            }
+                            input.pen(&p);
+                        }
                         Message::Ping { t } => sink.send(Message::Pong { t }).await?,
-                        Message::RequestKeyframe => want_key.store(true, Ordering::Relaxed),
+                        Message::RequestKeyframe => {
+                            // The client reset its decoder; nothing in flight will be acked.
+                            if let Some(w) = &in_flight {
+                                w.clear();
+                            }
+                            want_key.store(true, Ordering::Relaxed);
+                        }
+                        Message::Ack { pts_us } => {
+                            if let Some(w) = &in_flight {
+                                w.ack(pts_us);
+                            }
+                        }
                         other => tracing::debug!("unexpected message from client: {other:?}"),
                     },
                 },
@@ -161,26 +199,36 @@ fn produce(
     opts: &SessionOptions,
     stop: &AtomicBool,
     want_key: &Arc<AtomicBool>,
+    stats: Option<&Arc<Stats>>,
+    in_flight: Option<&Arc<InFlight>>,
     tx: mpsc::Sender<Out>,
 ) -> Result<()> {
-    // A little under the nominal period, so a source flipping at exactly
-    // `fps` isn't throttled by timer jitter.
-    let min_interval = Duration::from_secs_f64(0.9 / opts.fps.max(1) as f64);
+    let period = Duration::from_secs_f64(1.0 / opts.fps.max(1) as f64);
     let start = Instant::now();
     let mut encoder: Option<(Encoder, std::thread::JoinHandle<()>)> = None;
     let mut last_id = None;
     let mut last_push: Option<Instant> = None;
+    // Earliest time the next frame may be sent. Slots advance by `period`
+    // from the previous slot, not from the (jittery) detection time, so a
+    // source flipping at exactly `fps` keeps every frame while faster
+    // sources are still capped at `fps` on average.
+    let mut next_slot = start;
 
     while !stop.load(Ordering::Relaxed) && !tx.is_closed() {
         std::thread::sleep(POLL_INTERVAL);
         let now = Instant::now();
-        let since_push = last_push.map_or(Duration::MAX, |t| now - t);
-        if since_push < min_interval {
+        if now < next_slot {
             continue;
         }
+        let since_push = last_push.map_or(Duration::MAX, |t| now - t);
         let Some(id) = source.current_id()? else { continue };
         let key_requested = want_key.load(Ordering::Relaxed);
         if last_id == Some(id) && since_push < REFRESH_INTERVAL && !key_requested {
+            continue;
+        }
+        // The client is still busy with earlier frames: skip this one before
+        // encoding it, and pick up whatever is current once there's room.
+        if in_flight.is_some_and(|w| w.is_full()) {
             continue;
         }
 
@@ -193,7 +241,7 @@ fn produce(
                 let _ = puller.join();
             }
             let enc = Encoder::new(frame.width, frame.height, frame.format, &opts.encoder)?;
-            let puller = spawn_puller(&enc, size, tx.clone(), want_key.clone())?;
+            let puller = spawn_puller(&enc, size, tx.clone(), want_key.clone(), stats.cloned())?;
             encoder = Some((enc, puller));
         }
         let (enc, _) = encoder.as_ref().unwrap();
@@ -202,7 +250,15 @@ fn produce(
         }
         last_id = Some(frame.buffer_id);
         last_push = Some(now);
-        enc.push(frame, (now - start).as_micros() as u64)?;
+        next_slot = next_slot.max(now - period) + period;
+        let pts = (now - start).as_micros() as u64;
+        enc.push(frame, pts)?;
+        if let Some(w) = in_flight {
+            w.push(pts);
+        }
+        if let Some(stats) = stats {
+            stats.frame_pushed(pts, now);
+        }
     }
     Ok(())
 }
@@ -212,8 +268,9 @@ fn spawn_puller(
     (width, height): (u32, u32),
     tx: mpsc::Sender<Out>,
     want_key: Arc<AtomicBool>,
+    stats: Option<Arc<Stats>>,
 ) -> Result<std::thread::JoinHandle<()>> {
-    let output = enc.output();
+    let mut output = enc.output();
     std::thread::Builder::new()
         .name("tabula-encode".into())
         .spawn(move || {
@@ -222,6 +279,9 @@ fn spawn_puller(
             // until the next keyframe.
             let mut resync = false;
             while let Some(au) = output.pull() {
+                if let Some(stats) = &stats {
+                    stats.frame_encoded(au.pts_us);
+                }
                 if !configured {
                     let Some(codec) = codec_string(&au.data) else {
                         tracing::warn!("encoder output started without SPS");

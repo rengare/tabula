@@ -31,6 +31,7 @@ fn samples() -> Vec<(&'static str, Message)> {
         ),
         ("ping", Message::Ping { t: 0x0102_0304_0506_0708 }),
         ("request_keyframe", Message::RequestKeyframe),
+        ("ack", Message::Ack { pts_us: 123_456_789 }),
         (
             "stream_config",
             Message::StreamConfig(StreamConfig {

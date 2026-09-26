@@ -41,6 +41,12 @@ enum Cmd {
         /// Don't create the virtual pen; the tablet only shows the screen.
         #[arg(long)]
         view_only: bool,
+        /// Log per-stage latency percentiles every few seconds.
+        #[arg(long)]
+        stats: bool,
+        /// Frames in flight before waiting for the client's decoder (0 = no flow control).
+        #[arg(long, default_value_t = 2)]
+        max_in_flight: usize,
     },
     /// Create the virtual monitor and grant this binary capture rights (run as root).
     Setup {
@@ -70,9 +76,24 @@ fn main() -> Result<()> {
         )
         .init();
     match Cli::parse().cmd {
-        Cmd::Run { port, test_pattern, test_size, fps, bitrate_kbps, view_only } => {
+        Cmd::Run {
+            port,
+            test_pattern,
+            test_size,
+            fps,
+            bitrate_kbps,
+            view_only,
+            stats,
+            max_in_flight,
+        } => {
             let source = if test_pattern { Source::Test(test_size) } else { Source::VirtualDisplay };
-            run(port, source, fps, bitrate_kbps, view_only)
+            let opts = SessionOptions {
+                encoder: EncoderOptions { kind: EncoderKind::detect()?, bitrate_kbps },
+                fps,
+                stats,
+                max_in_flight,
+            };
+            run(port, source, opts, view_only)
         }
         Cmd::Setup { binary } => setup(binary),
         Cmd::Teardown => VirtualDisplay::new(DEFAULT_NAME).destroy(),
@@ -211,7 +232,7 @@ fn make_input(hello: &tabula_protocol::Hello, view_only: bool) -> Box<dyn InputH
     }
 }
 
-fn run(port: u16, source: Source, fps: u32, bitrate_kbps: u32, view_only: bool) -> Result<()> {
+fn run(port: u16, source: Source, opts: SessionOptions, view_only: bool) -> Result<()> {
     let card = match source {
         Source::VirtualDisplay => {
             if VirtualDisplay::new(DEFAULT_NAME).status() != Status::Enabled {
@@ -220,10 +241,6 @@ fn run(port: u16, source: Source, fps: u32, bitrate_kbps: u32, view_only: bool) 
             Some(tabula_capture::find_card("vkms")?)
         }
         Source::Test(_) => None,
-    };
-    let opts = SessionOptions {
-        encoder: EncoderOptions { kind: EncoderKind::detect()?, bitrate_kbps },
-        fps,
     };
     tracing::info!(encoder = ?opts.encoder.kind, "using encoder");
 

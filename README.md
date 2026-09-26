@@ -14,6 +14,22 @@ Use an Android pen tablet as a second (or mirrored) monitor and a pressure-sensi
 - Milestone 2 (pen through uinput): works on COSMIC; pressure, tilt, eraser and barrel buttons. Capture polls for new buffers every 4 ms so flips aren't missed.
 - Next: LAN mode (HTTPS + pairing), hardware encoder, touch.
 
+## Performance
+
+Measured with `tabula run --stats` and `node tools/bench.ts` (hovers the virtual pen in a circle and counts frames), mirroring a 1920×1200 laptop to a Lenovo TB336FU (MediaTek MT8755) over USB:
+
+| Stage | p50 / p95 |
+|---|---|
+| COSMIC page flips on the virtual monitor | 60/s |
+| Frames sent without flow control | 60/s |
+| Grab (detect new buffer → copied) | 0.8 / 1.0 ms |
+| Encode (x264, 1920×1200) | 4.8 / 6.5 ms |
+| Pen sample → frame showing it sent | 18 / 22 ms |
+| USB round trip | ~6 ms |
+| Decode on the tablet (Chrome WebCodecs) | ~20 ms |
+
+Chrome's hardware decoder on this tablet tops out around 36–41 fps regardless of resolution, which is a fixed per-frame cost in Chrome's WebCodecs path on Android. The client acknowledges every decoded frame (`Ack`) and the server keeps at most `--max-in-flight` (default 2) frames unacknowledged, skipping capture instead of queueing. That keeps latency bounded; without it the decoder queue grew by ~25 frames per second (over a second of lag). A native client using MediaCodec directly should reach the full 60 fps.
+
 ## Build
 
 ```fish

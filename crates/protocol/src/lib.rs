@@ -18,6 +18,7 @@ mod tag {
     pub const PEN: u8 = 0x02;
     pub const PING: u8 = 0x04;
     pub const REQUEST_KEYFRAME: u8 = 0x05;
+    pub const ACK: u8 = 0x06;
 
     pub const STREAM_CONFIG: u8 = 0x81;
     pub const VIDEO: u8 = 0x82;
@@ -42,6 +43,9 @@ impl Features {
     pub const BARREL_BUTTON: Self = Self(1 << 3);
     pub const TILT: Self = Self(1 << 4);
     pub const TOUCH: Self = Self(1 << 5);
+    /// The client sends [`Message::Ack`] for every decoded frame, which
+    /// lets the server limit frames in flight to what the client keeps up with.
+    pub const ACKS: Self = Self(1 << 6);
 
     pub fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
@@ -121,6 +125,8 @@ pub enum Message {
     Pen(Pen),
     Ping { t: u64 },
     RequestKeyframe,
+    /// The frame with this `pts_us` has been decoded.
+    Ack { pts_us: u64 },
     StreamConfig(StreamConfig),
     Video(Video),
     Pong { t: u64 },
@@ -172,6 +178,10 @@ impl Message {
                 w.u64(*t);
             }
             Message::RequestKeyframe => w.u8(tag::REQUEST_KEYFRAME),
+            Message::Ack { pts_us } => {
+                w.u8(tag::ACK);
+                w.u64(*pts_us);
+            }
             Message::StreamConfig(s) => {
                 w.u8(tag::STREAM_CONFIG);
                 w.u16(s.width);
@@ -247,6 +257,7 @@ impl Message {
             }
             tag::PING => Message::Ping { t: r.u64()? },
             tag::REQUEST_KEYFRAME => Message::RequestKeyframe,
+            tag::ACK => Message::Ack { pts_us: r.u64()? },
             tag::STREAM_CONFIG => Message::StreamConfig(StreamConfig {
                 width: r.u16()?,
                 height: r.u16()?,

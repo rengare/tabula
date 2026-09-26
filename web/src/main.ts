@@ -28,6 +28,10 @@ let config: StreamConfig | null = null;
 let waitingForKey = true;
 let rttMs = 0;
 let framesDrawn = 0;
+/** Decode submit time per chunk timestamp, for the HUD's decode latency. */
+const submitted = new Map<number, number>();
+let decodeMs: number[] = [];
+let drawMs: number[] = [];
 
 function send(msg: Message) {
   if (ws?.readyState === WebSocket.OPEN) ws.send(encode(msg));
@@ -48,7 +52,15 @@ function resetDecoder() {
   const c = config;
   decoder = new VideoDecoder({
     output(frame) {
+      const t1 = performance.now();
+      const t0 = submitted.get(frame.timestamp);
+      if (t0 !== undefined) {
+        decodeMs.push(t1 - t0);
+        submitted.delete(frame.timestamp);
+      }
       ctx.drawImage(frame, 0, 0);
+      drawMs.push(performance.now() - t1);
+      send({ type: "Ack", pts_us: BigInt(frame.timestamp) });
       frame.close();
       framesDrawn++;
     },
@@ -82,6 +94,8 @@ function onVideo(keyframe: boolean, pts: bigint, data: Uint8Array) {
     if (!keyframe) return;
     waitingForKey = false;
   }
+  if (submitted.size > 120) submitted.clear(); // chunks the decoder dropped
+  submitted.set(Number(pts), performance.now());
   decoder.decode(new EncodedVideoChunk({ type: keyframe ? "key" : "delta", timestamp: Number(pts), data }));
 }
 
@@ -101,7 +115,8 @@ function connect() {
       hello: {
         proto_ver: PROTOCOL_VERSION,
         client_kind: ClientKind.Web,
-        features: Features.Pen | Features.Hover | Features.Eraser | Features.BarrelButton | Features.Tilt,
+        features:
+          Features.Pen | Features.Hover | Features.Eraser | Features.BarrelButton | Features.Tilt | Features.Acks,
         screen_w: Math.round(screen.width * dpr),
         screen_h: Math.round(screen.height * dpr),
         dpi: Math.round(96 * dpr),
@@ -139,7 +154,11 @@ setInterval(() => send({ type: "Ping", t: BigInt(Math.round(performance.now() * 
 
 let lastFrames = 0;
 setInterval(() => {
-  hud.textContent = `${framesDrawn - lastFrames} fps · rtt ${rttMs.toFixed(1)} ms`;
+  const median = (v: number[]) => (v.length ? v.sort((a, b) => a - b)[Math.floor(v.length / 2)].toFixed(1) : "-");
+  const queue = decoder?.decodeQueueSize ?? 0;
+  hud.textContent = `${framesDrawn - lastFrames} fps · rtt ${rttMs.toFixed(1)} ms · decode ${median(decodeMs)} ms · draw ${median(drawMs)} ms · queue ${queue}`;
+  decodeMs = [];
+  drawMs = [];
   lastFrames = framesDrawn;
 }, 1000);
 

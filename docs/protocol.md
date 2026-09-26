@@ -31,8 +31,11 @@ Receivers **must ignore messages with unknown tags**. That lets newer peers add 
 | `0x02` | Pen | `x u16`, `y u16` (normalized to the video frame: 0 = left/top, 65535 = right/bottom), `pressure u16` (0–65535), `tilt_x i8`, `tilt_y i8` (degrees, −90..90), `tool u8` (0 pen, 1 eraser), `buttons u8` (bit0 barrel, bit1 second barrel), `flags u8` (bit0 contact, bit1 in_range) |
 | `0x04` | Ping | `t u64`: an opaque client timestamp, echoed back in Pong |
 | `0x05` | RequestKeyframe | none |
+| `0x06` | Ack | `pts_us u64`: the frame with this pts has been decoded |
 
-`features` bits: 0 pen, 1 hover, 2 eraser, 3 barrel button, 4 tilt, 5 touch.
+`features` bits: 0 pen, 1 hover, 2 eraser, 3 barrel button, 4 tilt, 5 touch, 6 acks.
+
+Flow control: a client that sets the `acks` feature sends `Ack` as soon as each frame comes out of its decoder. The server then keeps at most a few frames in flight (sent, or being encoded, but not yet acknowledged) and skips capturing while the window is full. Frames are skipped *before* encoding, so the stream stays decodable and its frame rate adapts to whatever the client's decoder and link keep up with. Without the feature, the server sends at its configured frame rate.
 
 Pen semantics: send one Pen message per input sample (use coalesced samples when available). When `in_range` = 0, the pen has left proximity. The server releases all buttons.
 

@@ -9,6 +9,8 @@ use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use gstreamer_video as gst_video;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tabula_capture::{Frame, PixelFormat};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +71,11 @@ pub struct Encoder {
     sink: gst_app::AppSink,
     width: u32,
     height: u32,
+    first_pts: Arc<AtomicU64>,
 }
+
+/// Not yet set.
+const NO_PTS: u64 = u64::MAX;
 
 impl Encoder {
     pub fn new(width: u32, height: u32, format: PixelFormat, opts: &EncoderOptions) -> Result<Self> {
@@ -103,7 +109,7 @@ impl Encoder {
         pipeline
             .set_state(gst::State::Playing)
             .context("starting encoder pipeline")?;
-        Ok(Self { pipeline, src, sink, width, height })
+        Ok(Self { pipeline, src, sink, width, height, first_pts: Arc::new(AtomicU64::new(NO_PTS)) })
     }
 
     pub fn size(&self) -> (u32, u32) {
@@ -111,6 +117,7 @@ impl Encoder {
     }
 
     pub fn push(&self, frame: Frame, pts_us: u64) -> Result<()> {
+        let _ = self.first_pts.compare_exchange(NO_PTS, pts_us, Ordering::Relaxed, Ordering::Relaxed);
         let mut buf = gst::Buffer::from_mut_slice(frame.data);
         buf.get_mut()
             .expect("fresh buffer is writable")
@@ -128,7 +135,7 @@ impl Encoder {
 
     /// A handle for pulling encoded output, usable from another thread.
     pub fn output(&self) -> EncoderOutput {
-        EncoderOutput { sink: self.sink.clone() }
+        EncoderOutput { sink: self.sink.clone(), first_in: self.first_pts.clone(), first_out: None }
     }
 }
 
@@ -141,16 +148,26 @@ impl Drop for Encoder {
 
 pub struct EncoderOutput {
     sink: gst_app::AppSink,
+    first_in: Arc<AtomicU64>,
+    first_out: Option<u64>,
 }
 
 impl EncoderOutput {
     /// Blocks until the next access unit. `None` once the encoder is gone.
-    pub fn pull(&self) -> Option<AccessUnit> {
+    ///
+    /// The pipeline rebases timestamps to start at zero and x264enc adds a
+    /// 1000 hour offset on top, so output pts are mapped back onto the pts
+    /// passed to [`Encoder::push`]. The first output always belongs to the
+    /// first input since neither encoder reorders or drops frames here.
+    pub fn pull(&mut self) -> Option<AccessUnit> {
         let sample = self.sink.pull_sample().ok()?;
         let buffer = sample.buffer()?;
         let map = buffer.map_readable().ok()?;
+        let raw = buffer.pts().map_or(0, |t| t.useconds());
+        let first_out = *self.first_out.get_or_insert(raw);
+        let first_in = self.first_in.load(Ordering::Relaxed);
         Some(AccessUnit {
-            pts_us: buffer.pts().map_or(0, |t| t.useconds()),
+            pts_us: (raw - first_out).saturating_add(if first_in == NO_PTS { 0 } else { first_in }),
             keyframe: !buffer.flags().contains(gst::BufferFlags::DELTA_UNIT),
             data: map.as_slice().to_vec(),
         })
@@ -212,14 +229,20 @@ mod tests {
         let opts = EncoderOptions { kind: EncoderKind::detect()?, bitrate_kbps: 4000 };
         let mut src = TestPattern::new(320, 240);
         let enc = Encoder::new(320, 240, PixelFormat::Rgbx, &opts)?;
-        let out = enc.output();
-        for i in 0..5 {
-            enc.push(src.grab()?.unwrap(), i * 16_667)?;
+        let mut out = enc.output();
+        let pts = [1_000u64, 17_000, 33_500, 51_234, 70_000];
+        for p in pts {
+            enc.push(src.grab()?.unwrap(), p)?;
         }
         let first = out.pull().context("no output from encoder")?;
         assert!(first.keyframe);
         let codec = codec_string(&first.data).context("first access unit has no SPS")?;
         assert!(codec.starts_with("avc1.42"), "not constrained baseline: {codec}");
+        assert_eq!(first.pts_us, pts[0]);
+        for p in &pts[1..4] {
+            assert_eq!(out.pull().context("missing output")?.pts_us, *p, "pts not preserved");
+        }
         Ok(())
     }
 }
+

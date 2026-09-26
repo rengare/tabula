@@ -34,6 +34,7 @@ const expected: Record<string, Message> = {
   },
   ping: { type: "Ping", t: 0x0102030405060708n },
   request_keyframe: { type: "RequestKeyframe" },
+  ack: { type: "Ack", pts_us: 123456789n },
   stream_config: { type: "StreamConfig", config: { width: 1920, height: 1200, codec: "avc1.42E033" } },
   video: { type: "Video", video: { pts_us: 16667n, keyframe: true, data: new Uint8Array([0, 0, 0, 1, 0x67, 0x42]) } },
   pong: { type: "Pong", t: 42n },
