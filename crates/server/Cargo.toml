@@ -1,0 +1,24 @@
+[package]
+name = "tabula"
+description = "Use an Android pen tablet as a second monitor and drawing tablet for Linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tabula-protocol.workspace = true
+tabula-vdisplay.workspace = true
+tabula-capture.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+png.workspace = true
+libc.workspace = true
+tabula-encode.workspace = true
+tabula-session.workspace = true
+tokio.workspace = true
+axum.workspace = true
+rust-embed.workspace = true
+mime_guess.workspace = true
+futures-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

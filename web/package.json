@@ -1,0 +1,16 @@
+{
+  "name": "tabula-web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --minify --sourcemap --target=chrome110,firefox130 --outfile=dist/main.js && cp index.html dist/",
+    "watch": "esbuild src/main.ts --bundle --sourcemap --outfile=dist/main.js --watch",
+    "check": "tsc --noEmit",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2"
+  }
+}

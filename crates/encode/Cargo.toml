@@ -1,0 +1,13 @@
+[package]
+name = "tabula-encode"
+description = "Low-latency H.264 encoding of captured frames via GStreamer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tabula-capture.workspace = true
+anyhow.workspace = true
+gstreamer.workspace = true
+gstreamer-app.workspace = true
+gstreamer-video.workspace = true

@@ -1,0 +1,11 @@
+[package]
+name = "tabula-capture"
+description = "Read the framebuffer scanned out on a DRM plane (kmsgrab-style), independent of the compositor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+drm.workspace = true
+libc.workspace = true
