@@ -9,6 +9,7 @@ license.workspace = true
 tabula-protocol.workspace = true
 tabula-vdisplay.workspace = true
 tabula-capture.workspace = true
+tabula-screencast.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 png.workspace = true

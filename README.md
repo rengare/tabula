@@ -4,6 +4,7 @@ Use an Android pen tablet as a second (or mirrored) monitor and a pressure-sensi
 
 - **Virtual monitor:** the kernel's `vkms` driver, configured through configfs. Your desktop sees an ordinary hotplugged monitor. For mirror mode, set it to mirror in display settings.
 - **Capture:** tabula reads the monitor's scanout buffer directly from DRM.
+- **Sharing a running monitor** (`--share`): the xdg-desktop-portal ScreenCast API over PipeWire, which GNOME, KDE, COSMIC and wlroots all implement.
 - **Pen input:** a `uinput` virtual tablet (pressure, tilt, eraser).
 - **Tablet side:** a web page (WebCodecs + Pointer Events), so there's nothing to install. A native app can be added later using the same [protocol](docs/protocol.md).
 
@@ -33,6 +34,8 @@ Chrome's hardware decoder on this tablet tops out around 36–41 fps regardless 
 
 ## Build
 
+Needs the PipeWire headers and libclang (Ubuntu: `sudo apt install libpipewire-0.3-dev libclang-dev`).
+
 ```fish
 cd web; and npm install; and npm run build; and cd ..   # the web client is embedded in the binary
 cargo build --release
@@ -60,6 +63,21 @@ The virtual monitor starts at 1024×768. Set its mode in display settings:
 - **Mirror:** use the same mode *and scale* as the mirrored display. COSMIC draws the mirrored display's logical area at the target's scale without stretching it, so a 1920×1200 laptop at 110% needs `Virtual-1` at 1920×1200 and 110%. Otherwise the picture is letterboxed inside the frame. On COSMIC: `cosmic-randr mode Virtual-1 1920 1200 --scale 1.1`.
 
 Rebuilding the binary drops its capability, so rerun `setup` after a rebuild.
+
+## Share a running monitor
+
+```fish
+./target/release/tabula run --share
+./target/release/tabula capture-test --share   # writes tabula-frame.png from the shared monitor
+```
+
+Instead of creating a virtual monitor, this streams a monitor you already have, such as the laptop panel. It doesn't need `tabula setup` or `CAP_SYS_ADMIN`, and the cursor is drawn into the picture. Every start shows the desktop's screen sharing dialog, where you pick the monitor. If you stop sharing from the desktop, restart `tabula run --share` to share again.
+
+kmsgrab can't do this on most real GPUs. On the Snapdragon X1E, for example, the panel is scanned out as 10-bit AR30 with Qualcomm's compressed (UBWC) tiling, and the cursor is on a separate hardware plane, so the CPU can't read the buffer directly. The portal has the compositor render the monitor into linear shared memory instead.
+
+The pen and touch devices still cover the whole picture, so map them to the shared monitor (see [Pen and touch](#pen-and-touch)). COSMIC maps them to the built-in display by default, which is right when you share the laptop panel.
+
+On COSMIC the portal delivers about 35 fps for a 1920×1200 panel (pen sample → frame sent: 24 / 47 ms p50 / p95), compared with 60 fps from the virtual monitor.
 
 ## Wi-Fi
 

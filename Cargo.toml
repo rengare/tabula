@@ -11,6 +11,7 @@ license = "MIT OR Apache-2.0"
 tabula-protocol = { path = "crates/protocol" }
 tabula-vdisplay = { path = "crates/vdisplay" }
 tabula-capture = { path = "crates/capture" }
+tabula-screencast = { path = "crates/screencast" }
 tabula-encode = { path = "crates/encode" }
 tabula-session = { path = "crates/session" }
 tabula-vinput = { path = "crates/vinput" }

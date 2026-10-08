@@ -1,0 +1,13 @@
+[package]
+name = "tabula-screencast"
+description = "Capture a running monitor through the xdg-desktop-portal ScreenCast API and PipeWire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tabula-capture.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "screencast"] }
+pipewire = "0.10"

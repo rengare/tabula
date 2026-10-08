@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tabula_capture::{Capturer, FrameSource, TestPattern};
+use tabula_screencast::ScreenCast;
 use tabula_encode::{EncoderKind, EncoderOptions};
 use tabula_protocol::DEFAULT_PORT;
 use tabula_session::{InputHandler, LogInput, SessionOptions};
@@ -25,10 +26,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Stream the virtual monitor to connected tablets.
+    /// Stream the virtual monitor (or, with --share, a running one) to connected tablets.
     Run {
         #[arg(long, default_value_t = DEFAULT_PORT)]
         port: u16,
+        /// Share a monitor that's already running (picked in the desktop's
+        /// screen sharing dialog) instead of the virtual monitor.
+        #[arg(long, conflicts_with = "test_pattern")]
+        share: bool,
         /// Stream a synthetic test pattern instead of the virtual monitor.
         #[arg(long)]
         test_pattern: bool,
@@ -78,6 +83,9 @@ enum Cmd {
     CaptureTest {
         #[arg(long, default_value = "tabula-frame.png")]
         out: PathBuf,
+        /// Grab from a running monitor through screen sharing, like `run --share`.
+        #[arg(long)]
+        share: bool,
         /// Seconds to wait for the compositor to light up the output.
         #[arg(long, default_value_t = 10)]
         wait: u64,
@@ -94,6 +102,7 @@ fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Run {
             port,
+            share,
             test_pattern,
             test_size,
             fps,
@@ -117,7 +126,13 @@ fn main() -> Result<()> {
                 }
                 None => EncoderKind::detect()?,
             };
-            let source = if test_pattern { Source::Test(test_size) } else { Source::VirtualDisplay };
+            let source = if test_pattern {
+                Source::Test(test_size)
+            } else if share {
+                Source::Share
+            } else {
+                Source::VirtualDisplay
+            };
             let opts = SessionOptions {
                 encoder: EncoderOptions { kind, bitrate_kbps },
                 fps,
@@ -133,7 +148,7 @@ fn main() -> Result<()> {
             println!("{:?}", VirtualDisplay::new(DEFAULT_NAME).status());
             Ok(())
         }
-        Cmd::CaptureTest { out, wait } => capture_test(&out, Duration::from_secs(wait)),
+        Cmd::CaptureTest { out, share, wait } => capture_test(&out, share, Duration::from_secs(wait)),
     }
 }
 
@@ -187,22 +202,35 @@ fn install_uinput_rule() -> Result<()> {
     Ok(())
 }
 
-fn capture_test(out: &Path, wait: Duration) -> Result<()> {
-    if VirtualDisplay::new(DEFAULT_NAME).status() != Status::Enabled {
-        bail!("virtual monitor is not set up; run `sudo tabula setup` first");
-    }
-    let card = tabula_capture::find_card("vkms")?;
-    let mut cap = Capturer::open(&card)?;
+/// With `share`, grabs through screen sharing instead of the virtual monitor.
+fn capture_test(out: &Path, share: bool, wait: Duration) -> Result<()> {
+    // Kept alive while grabbing; dropping it ends the portal session.
+    let mut _cast = None;
+    let (mut cap, name): (Box<dyn FrameSource>, String) = match share {
+        true => {
+            let rt = tokio::runtime::Runtime::new()?;
+            let (cast, make) = rt.block_on(start_screencast())?;
+            _cast = Some((rt, cast));
+            (make()?, "the shared monitor".into())
+        }
+        false => {
+            if VirtualDisplay::new(DEFAULT_NAME).status() != Status::Enabled {
+                bail!("virtual monitor is not set up; run `sudo tabula setup` first");
+            }
+            let card = tabula_capture::find_card("vkms")?;
+            (Box::new(Capturer::open(&card)?), card.display().to_string())
+        }
+    };
     let deadline = Instant::now() + wait;
     let frame = loop {
         if let Some(f) = cap.grab()? {
             break f;
         }
         if Instant::now() >= deadline {
-            bail!(
-                "{} has no active framebuffer; enable the virtual monitor in display settings",
-                card.display()
-            );
+            if share {
+                bail!("no frame from the shared monitor within {wait:?}");
+            }
+            bail!("{name} has no active framebuffer; enable the virtual monitor in display settings");
         }
         std::thread::sleep(Duration::from_millis(200));
     };
@@ -215,7 +243,7 @@ fn capture_test(out: &Path, wait: Duration) -> Result<()> {
         "saved {}x{} frame from {} to {}",
         frame.width,
         frame.height,
-        card.display(),
+        name,
         out.display()
     );
     Ok(())
@@ -234,7 +262,20 @@ fn parse_size(s: &str) -> Result<(u32, u32), String> {
 #[derive(Clone, Copy)]
 enum Source {
     VirtualDisplay,
+    /// A running monitor, through the screen cast portal.
+    Share,
     Test((u32, u32)),
+}
+
+type SourceFactory = Arc<dyn Fn() -> Result<Box<dyn FrameSource>> + Send + Sync>;
+
+/// Starts the portal screen cast; the desktop asks which monitor to share.
+/// The cast stays alive as long as the returned value.
+async fn start_screencast() -> Result<(ScreenCast, SourceFactory)> {
+    println!("choose the monitor to share in the dialog on your desktop");
+    let cast = ScreenCast::start().await?;
+    let make = cast.source_factory();
+    Ok((cast, Arc::new(move || Ok(make()))))
 }
 
 /// The session's virtual input devices; either may be missing.
@@ -297,37 +338,43 @@ fn run(
     opts: SessionOptions,
     view_only: bool,
 ) -> Result<()> {
-    let card = match source {
+    let rt = tokio::runtime::Runtime::new()?;
+    // Kept alive until the server stops; dropping it ends the portal session.
+    let mut _cast = None;
+    let make_source: SourceFactory = match source {
         Source::VirtualDisplay => {
             if VirtualDisplay::new(DEFAULT_NAME).status() != Status::Enabled {
-                bail!("virtual monitor is not set up; run `sudo tabula setup` (or use --test-pattern)");
+                bail!(
+                    "virtual monitor is not set up; run `sudo tabula setup` \
+                     (or use --share or --test-pattern)"
+                );
             }
-            Some(tabula_capture::find_card("vkms")?)
+            let card = tabula_capture::find_card("vkms")?;
+            Arc::new(move || Ok(Box::new(Capturer::open(&card)?) as Box<dyn FrameSource>))
         }
-        Source::Test(_) => None,
+        Source::Share => {
+            let (cast, make) = rt.block_on(start_screencast())?;
+            _cast = Some(cast);
+            make
+        }
+        Source::Test((w, h)) => Arc::new(move || Ok(Box::new(TestPattern::new(w, h)) as Box<dyn FrameSource>)),
     };
     tracing::info!(encoder = ?opts.encoder.kind, "using encoder");
 
     let on_connect: ws::SessionFactory = Arc::new(move |sink, stream| {
-        let card = card.clone();
-        let make_source = move || -> Result<Box<dyn FrameSource>> {
-            Ok(match (source, card) {
-                (Source::Test((w, h)), _) => Box::new(TestPattern::new(w, h)),
-                (Source::VirtualDisplay, Some(card)) => Box::new(Capturer::open(&card)?),
-                (Source::VirtualDisplay, None) => unreachable!(),
-            })
-        };
+        let make_source = make_source.clone();
         let opts = opts.clone();
         tokio::spawn(async move {
             let make_input = move |hello: &tabula_protocol::Hello| make_input(hello, view_only);
-            let result = tabula_session::run(sink, stream, make_source, make_input, opts).await;
+            let result =
+                tabula_session::run(sink, stream, move || make_source(), make_input, opts).await;
             if let Err(e) = result {
                 tracing::warn!("session ended: {e:#}");
             }
         });
     });
 
-    tokio::runtime::Runtime::new()?.block_on(async move {
+    rt.block_on(async move {
         // Loopback only: USB clients arrive through `adb reverse`.
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let listener = tokio::net::TcpListener::bind(addr)
